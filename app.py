@@ -1153,6 +1153,32 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     save_users(users_df)
                     st.success(tr(LANG_CODE,"terminated"))
 
+        # --- Hard delete selected user from users.csv (no other changes) ---
+        st.markdown(" ")
+        del_col1, del_col2 = st.columns([2,1])
+        with del_col1:
+            st.caption(" ")  # spacer
+        with del_col2:
+            del_label = "Delete user" if LANG_CODE == "en" else "حذف المستخدم"
+            if st.button(del_label, key="btn_delete_user"):
+                users_df = load_users()
+                mask = users_df["Name"].astype(str).str.strip().str.casefold() != str(target_name).strip().casefold()
+                if mask.all():
+                    st.error("User not found." if LANG_CODE=="en" else "المستخدم غير موجود.")
+                else:
+                    users_df = users_df[mask]
+                    save_users(users_df)
+                    # NOTE: Per your request, we only delete from users table.
+                    # If you later want to remove their past predictions too,
+                    # uncomment the next 4 lines:
+                    # if os.path.exists(PREDICTIONS_FILE):
+                    #     _p = pd.read_csv(PREDICTIONS_FILE)
+                    #     _p = _p[_p["User"].astype(str).str.strip().str.casefold() != str(target_name).strip().casefold()]
+                    #     save_csv(_p, PREDICTIONS_FILE)
+                    st.success("User deleted." if LANG_CODE=="en" else "تم حذف المستخدم.")
+                    st.rerun()
+
+
 # ─────────────────────────────
 # Router & bootstrap
 # ─────────────────────────────
