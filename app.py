@@ -23,6 +23,7 @@ TEAM_LOGOS_FILE    = os.path.join(DATA_DIR, "team_logos.json")
 LOGO_DIR           = os.path.join(DATA_DIR, "logos")
 os.makedirs(LOGO_DIR, exist_ok=True)
 
+# For security, consider: ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "madness")
 ADMIN_PASSWORD = "madness"
 
 # ─────────────────────────────
@@ -222,7 +223,7 @@ def tr(lang, key, **kwargs):
     txt = d.get(key, key)
     return txt.format(**kwargs) if kwargs else txt
 # ─────────────────────────────
-# Utilities & Supabase-aware persistence (drop-in replacement)
+# Utilities & Supabase-aware persistence (drop-in)
 # ─────────────────────────────
 def normalize_digits(text: str) -> str:
     if not isinstance(text, str): return text
@@ -238,6 +239,7 @@ def normalize_digits(text: str) -> str:
     return text
 
 def _filename_from_url_local(url: str) -> str:
+    from urllib.parse import urlparse
     parsed = urlparse(url)
     base = os.path.basename(parsed.path) or "logo.png"
     ext = os.path.splitext(base)[1] or ".png"
@@ -256,7 +258,7 @@ def _supa_client():
         pass
     return None
 
-# Table mapping (files -> table names)
+# Map local "files" to table names
 _TABLES = {
     USERS_FILE: "users",
     MATCHES_FILE: "matches",
@@ -266,7 +268,7 @@ _TABLES = {
     TEAM_LOGOS_FILE: "team_logos",
 }
 
-# Primary key mapping for upserts
+# Primary key columns for upserts
 _PK = {
     "users": "username",
     "matches": "match",
@@ -274,15 +276,14 @@ _PK = {
     "team_logos": "team",
 }
 
-# Column name mapping between DB and app DataFrame expected names
-# DB columns are lowercase (as created), app uses capitalized CSV style.
+# DB → App column mapping
 _DB_TO_APP = {
-    # users table
+    # users
     "username": "Name",
     "createdat": "CreatedAt",
     "isbanned": "IsBanned",
     "pinhash": "PinHash",
-    # matches table
+    # matches
     "match": "Match",
     "kickoff": "Kickoff",
     "result": "Result",
@@ -293,8 +294,8 @@ _DB_TO_APP = {
     "occasion": "Occasion",
     "occasionlogo": "OccasionLogo",
     "round": "Round",
-    # predictions
-    "username": "User",   # note: predictions DB uses username; app expects User
+    # predictions (username → User)
+    "username": "User",
     "prediction": "Prediction",
     "winner": "Winner",
     "submittedat": "SubmittedAt",
@@ -303,21 +304,20 @@ _DB_TO_APP = {
     "predictions": "Predictions",
     "exact": "Exact",
     "outcome": "Outcome",
-    # team_logos
+    # team logos
     "team": "Team",
     "logo": "Logo",
 }
 
 def _map_db_row_to_app(row: dict) -> dict:
     out = {}
-    for k,v in (row.items() if isinstance(row, dict) else []):
+    for k, v in (row.items() if isinstance(row, dict) else []):
         nk = _DB_TO_APP.get(k.lower(), k)
         out[nk] = v
     return out
 
 def load_csv(file, cols):
-    """Load table from Supabase if available; otherwise fallback to local CSV.
-       Returned DataFrame uses the app's expected column names (e.g., 'User', 'Match')."""
+    """Load from Supabase if configured; else local CSV."""
     client = _supa_client()
     tbl = _TABLES.get(file)
     if client and tbl:
@@ -326,20 +326,14 @@ def load_csv(file, cols):
             data = res.data or []
             if not data:
                 return pd.DataFrame(columns=cols)
-            rows = []
-            for r in data:
-                mapped = _map_db_row_to_app(r)
-                rows.append(mapped)
+            rows = [_map_db_row_to_app(r) for r in data]
             df = pd.DataFrame(rows)
-            # ensure requested cols exist
             for c in cols:
-                if c not in df.columns:
-                    df[c] = None
+                if c not in df.columns: df[c] = None
             return df[cols]
         except Exception:
             pass
 
-    # local fallback
     if os.path.exists(file) and os.path.getsize(file) > 0:
         df = pd.read_csv(file)
         for c in cols:
@@ -348,11 +342,10 @@ def load_csv(file, cols):
     return pd.DataFrame(columns=cols)
 
 def save_csv(df, file):
-    """Save DataFrame to Supabase (when available) and always write local CSV as cache/backup."""
+    """Save to Supabase when available + local CSV as backup."""
     client = _supa_client()
     tbl = _TABLES.get(file)
 
-    # Local write (backup)
     try:
         df.to_csv(file, index=False)
     except Exception:
@@ -360,44 +353,35 @@ def save_csv(df, file):
 
     if client and tbl:
         try:
-            # Prepare data mapping back to DB column names (lowercase)
+            # map App → DB (lowercase) columns
             data = []
+            reverse_map = {v: k for k, v in _DB_TO_APP.items()}
             for _, row in df.iterrows():
                 d = {}
                 for col, val in row.items():
-                    # reverse map from app-col to db-col
-                    for k_db, v_app in _DB_TO_APP.items():
-                        if v_app == col:
-                            d[k_db] = None if pd.isna(val) else val
-                            break
-                    else:
-                        # unknown column: include as-is lowercase
-                        d[col.lower()] = None if pd.isna(val) else val
+                    db_col = reverse_map.get(col, col.lower())
+                    d[db_col] = None if (pd.isna(val) if isinstance(val, float) else val) else val
                 data.append(d)
             pk = _PK.get(tbl)
             if pk:
                 client.table(tbl).upsert(data).execute()
             else:
-                # no PK: delete all and insert fresh (simple approach)
-                # delete all rows (careful: small tables)
                 client.table(tbl).delete().neq('match', '__no_match__').execute()
                 if data:
                     client.table(tbl).insert(data).execute()
         except Exception:
             pass
 
-# Supabase Storage upload helpers (store images)
+# Supabase Storage upload helpers (images)
 def _supa_upload_bytes(path_in_bucket: str, data: bytes) -> str | None:
     client = _supa_client()
     bucket = (st.secrets.get("SUPABASE_BUCKET") or "logos")
     if not client:
         return None
     try:
-        # path_in_bucket should not start with '/'
         p = path_in_bucket.lstrip("/")
         client.storage.from_(bucket).upload(p, data, {"upsert": True})
         public = client.storage.from_(bucket).get_public_url(p)
-        # supabase returns {'publicURL': '...'} or a string, handle both
         if isinstance(public, dict):
             return public.get("publicURL") or public.get("public_url")
         return public
@@ -405,20 +389,18 @@ def _supa_upload_bytes(path_in_bucket: str, data: bytes) -> str | None:
         return None
 
 def cache_logo_from_url(url: str) -> str | None:
-    """Download remote URL and upload to Supabase storage (if configured); otherwise save locally."""
+    """Cache remote image → Supabase Storage if available, else local /logos."""
     if not (isinstance(url, str) and url.lower().startswith(("http://", "https://"))):
         return None
-    client = _supa_client()
     try:
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         content = r.content
         fname = _filename_from_url_local(url)
-        if client:
-            uploaded = _supa_upload_bytes(f"fetched/{fname}", content)
-            if uploaded:
-                return uploaded
-        # fallback local file
+        uploaded = _supa_upload_bytes(f"fetched/{fname}", content)
+        if uploaded:
+            return uploaded
+        # fallback local
         path = os.path.join(LOGO_DIR, fname)
         with open(path, "wb") as f:
             f.write(content)
@@ -427,26 +409,154 @@ def cache_logo_from_url(url: str) -> str | None:
         return None
 
 def save_uploaded_logo(file, name_hint: str) -> str | None:
-    """Save uploaded file object to Supabase Storage (if configured) or local folder."""
+    """Save uploaded image → Supabase Storage or local /logos."""
     try:
         ext = os.path.splitext(file.name)[1] or ".png"
         safe = re.sub(r"[^A-Za-z0-9_-]+", "_", name_hint or "logo")
         fname = f"{safe}{ext}"
         data = file.read()
-        client = _supa_client()
-        if client:
-            uploaded = _supa_upload_bytes(f"uploads/{fname}", data)
-            if uploaded:
-                return uploaded
-        # fallback local
+        uploaded = _supa_upload_bytes(f"uploads/{fname}", data)
+        if uploaded:
+            return uploaded
+        # local fallback
         path = os.path.join(LOGO_DIR, fname)
         with open(path, "wb") as f:
             f.write(data)
         return path
     except Exception:
         return None
+
+# Team logos map (persisted JSON locally or via Supabase tables elsewhere if needed)
+def _load_team_logos() -> dict:
+    if os.path.exists(TEAM_LOGOS_FILE) and os.path.getsize(TEAM_LOGOS_FILE) > 0:
+        try:
+            with open(TEAM_LOGOS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def _save_team_logos(mapping: dict):
+    try:
+        with open(TEAM_LOGOS_FILE, "w", encoding="utf-8") as f:
+            json.dump(mapping, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def save_team_logo(team: str, logo_path_or_url: str | None):
+    if not team or not logo_path_or_url: return
+    logos = _load_team_logos()
+    logos[team] = logo_path_or_url
+    _save_team_logos(logos)
+
+def get_saved_logo(team: str) -> str | None:
+    logos = _load_team_logos()
+    return logos.get(team or "", None)
+
+def get_known_teams() -> list:
+    logos = _load_team_logos()
+    return sorted([k for k in logos.keys() if k])
+
+def ensure_history_schema(df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner",
+            "Occasion","OccasionLogo","Round","CompletedAt"]
+    if df.empty: return pd.DataFrame(columns=cols)
+    for c in cols:
+        if c not in df.columns: df[c] = None
+    return df[cols]
+
+# Theme & small UI helpers
+def apply_theme():
+    st.markdown("""
+    <style>
+      html, body, [data-testid="stAppViewContainer"] {
+        background: linear-gradient(180deg,#0a1f0f,#08210c);
+        color:#eafbea;
+      }
+      .card { background: rgba(255,255,255,0.06); border: 1px solid #134e29;
+              border-radius: 16px; padding: 12px 16px; box-shadow: 0 6px 18px rgba(0,0,0,0.25); margin-bottom:10px; }
+      .badge-gold { background:#FFF4C2; color:#000; border:1px solid #111; padding:4px 10px; border-radius:999px; font-weight:700; }
+      .welcome-wrap { width:100%; text-align:right; margin-top:-6px; margin-bottom:6px; color:#eafbea; opacity:0.9; }
+    </style>
+    """, unsafe_allow_html=True)
+
+def show_welcome_top_right(name: str, lang: str):
+    if not name: return
+    label = f"Welcome, <b>{name}</b>" if lang=="en" else f"مرحبًا، <b>{name}</b>"
+    st.markdown(f"""<div class="welcome-wrap">{label}</div>""", unsafe_allow_html=True)
+
+def show_logo_safe(img_ref, width=56, caption=""):
+    try:
+        if not img_ref or (isinstance(img_ref, float) and pd.isna(img_ref)):
+            return
+        s = str(img_ref).strip()
+        if not s:
+            return
+        if s.startswith("http://") or s.startswith("https://") or os.path.exists(s):
+            st.image(s, width=width, caption=caption)
+    except Exception:
+        pass
 # ─────────────────────────────
-# Additional utilities & small helpers
+# Time & formatting helpers
+# ─────────────────────────────
+def parse_iso_dt(val):
+    try:
+        return datetime.fromisoformat(str(val)) if pd.notna(val) and val else None
+    except Exception:
+        return None
+
+def to_tz(dt: datetime | None, tz: ZoneInfo) -> datetime | None:
+    if not dt: return None
+    if dt.tzinfo is None: return dt.replace(tzinfo=tz)
+    return dt.astimezone(tz)
+
+def format_dt_ampm(dt: datetime | None, tz: ZoneInfo, lang="en") -> str:
+    if not dt: return ""
+    loc = to_tz(dt, tz) if dt.tzinfo else dt.replace(tzinfo=tz)
+    if lang == "ar":
+        ampm = "صباحا" if loc.strftime("%p") == "AM" else "مساء"
+        return loc.strftime("%Y-%m-%d %I:%M ") + ampm
+    return loc.strftime("%Y-%m-%d %I:%M %p")
+
+def human_delta(delta: timedelta, lang: str) -> str:
+    total = int(max(0, delta.total_seconds()))
+    days = total // 86400
+    hours = (total % 86400) // 3600
+    minutes = (total % 3600) // 60
+    if lang == "ar":
+        day_w, hour_w, min_w = ("يوم" if days==1 else "ايام", "ساعة" if hours==1 else "ساعات", "دقيقة" if minutes==1 else "دقائق")
+        parts = []
+        if days: parts.append(f"{days} {day_w}")
+        parts.append(f"{hours} {hour_w}")
+        parts.append(f"{minutes} {min_w}")
+        return " ".join(parts)
+    parts = []
+    if days: parts.append(f"{days} {'day' if days==1 else 'days'}")
+    parts.append(f"{hours} {'hour' if hours==1 else 'hours'}")
+    parts.append(f"{minutes} {'minute' if minutes==1 else 'minutes'}")
+    return " ".join(parts)
+
+# ─────────────────────────────
+# PIN hashing
+# ─────────────────────────────
+def _hash_pin(pin: str) -> str:
+    salt = secrets.token_hex(8)
+    h = hashlib.sha256((salt + pin).encode("utf-8")).hexdigest()
+    return f"{salt}:{h}"
+
+def _verify_pin(stored: str | None, pin: str) -> bool:
+    try:
+        if stored is None: return False
+        if isinstance(stored, float) and pd.isna(stored): return False
+        s = str(stored)
+        if ":" not in s: return False
+        salt, h = s.split(":", 1)
+        return hashlib.sha256((salt + pin).encode("utf-8")).hexdigest() == h
+    except Exception:
+        return False
+
+# ─────────────────────────────
+# Scoring helpers (Draw fix included)
 # ─────────────────────────────
 def split_match_name(match_name: str) -> tuple[str, str]:
     parts = re.split(r"\s*vs\s*", str(match_name or ""), flags=re.IGNORECASE)
@@ -466,13 +576,17 @@ def normalize_score_pair(score_str: str) -> tuple[int,int] | None:
     return (max(a, b), min(a, b))  # order-insensitive
 
 def get_real_winner(match_row: pd.Series) -> str:
+    """Normalize admin-entered RealWinner & fall back to numeric result."""
     rw = str(match_row.get("RealWinner") or "").strip()
-    if rw:
-        return rw
+    # Treat both English & Arabic "draw" as Draw
+    if rw and rw.casefold() in {"draw", "تعادل"}:
+        return "Draw"
+
     result = match_row.get("Result")
     match_name = match_row.get("Match") or ""
     if not isinstance(result, str) or "-" not in result:
-        return "Draw"
+        # If no numeric result, return whatever admin set (non-draw) or Draw
+        return rw or "Draw"
     try:
         team_a, team_b = [p.strip() for p in re.split(r"\s*vs\s*", match_name, flags=re.IGNORECASE)]
     except Exception:
@@ -483,7 +597,7 @@ def get_real_winner(match_row: pd.Series) -> str:
     return team_a if r_a > r_b else team_b
 
 def points_for_prediction(match_row: pd.Series, pred: str, big_game: bool, chosen_winner: str) -> tuple[int,int,int]:
-    """(points, exact_flag, outcome_flag) — exact is order-insensitive; outcome uses admin 'RealWinner' or draw."""
+    """(points, exact_flag, outcome_flag) — exact ignores order; outcome uses normalized RealWinner or draw."""
     real = match_row.get("Result")
     if not isinstance(real, str) or not isinstance(pred, str):
         return (0,0,0)
@@ -575,7 +689,7 @@ def save_users(df):
     df[cols].to_csv(USERS_FILE, index=False)
 
 # ─────────────────────────────
-# Auth pages
+# Auth pages (Admin login fixed)
 # ─────────────────────────────
 def page_login(LANG_CODE: str):
     apply_theme()
@@ -588,6 +702,7 @@ def page_login(LANG_CODE: str):
         key="login_role_selector"
     )
 
+    # -------- User Login/Register --------
     if role == tr(LANG_CODE, "user_login"):
         users_df = load_users()
         st.subheader(tr(LANG_CODE, "user_login"))
@@ -646,100 +761,24 @@ def page_login(LANG_CODE: str):
                     st.session_state["current_name"] = reg_name.strip()
                     st.rerun()
 
-# Play & Leaderboard page code continues in Part 4...
-# continue from Part 3: define apply_theme, other helpers, page_play_and_leaderboard, page_admin, run_app
-
-def _hash_pin(pin: str) -> str:
-    salt = secrets.token_hex(8)
-    h = hashlib.sha256((salt + pin).encode("utf-8")).hexdigest()
-    return f"{salt}:{h}"
-
-def _verify_pin(stored: str | None, pin: str) -> bool:
-    try:
-        if stored is None: return False
-        if isinstance(stored, float) and pd.isna(stored): return False
-        s = str(stored)
-        if ":" not in s: return False
-        salt, h = s.split(":", 1)
-        return hashlib.sha256((salt + pin).encode("utf-8")).hexdigest() == h
-    except Exception:
-        return False
-
-def parse_iso_dt(val):
-    try:
-        return datetime.fromisoformat(str(val)) if pd.notna(val) and val else None
-    except Exception:
-        return None
-
-def to_tz(dt: datetime | None, tz: ZoneInfo) -> datetime | None:
-    if not dt: return None
-    if dt.tzinfo is None: return dt.replace(tzinfo=tz)
-    return dt.astimezone(tz)
-
-def format_dt_ampm(dt: datetime | None, tz: ZoneInfo, lang="en") -> str:
-    if not dt: return ""
-    loc = to_tz(dt, tz) if dt.tzinfo else dt.replace(tzinfo=tz)
-    if lang == "ar":
-        ampm = "صباحا" if loc.strftime("%p") == "AM" else "مساء"
-        return loc.strftime("%Y-%m-%d %I:%M ") + ampm
-    return loc.strftime("%Y-%m-%d %I:%M %p")
-
-def human_delta(delta: timedelta, lang: str) -> str:
-    total = int(max(0, delta.total_seconds()))
-    days = total // 86400
-    hours = (total % 86400) // 3600
-    minutes = (total % 3600) // 60
-    if lang == "ar":
-        day_w, hour_w, min_w = ("يوم" if days==1 else "ايام", "ساعة" if hours==1 else "ساعات", "دقيقة" if minutes==1 else "دقائق")
-        parts = []
-        if days: parts.append(f"{days} {day_w}")
-        parts.append(f"{hours} {hour_w}")
-        parts.append(f"{minutes} {min_w}")
-        return " ".join(parts)
-    parts = []
-    if days: parts.append(f"{days} {'day' if days==1 else 'days'}")
-    parts.append(f"{hours} {'hour' if hours==1 else 'hours'}")
-    parts.append(f"{minutes} {'minute' if minutes==1 else 'minutes'}")
-    return " ".join(parts)
-
-# theme
-def apply_theme():
-    st.markdown("""
-    <style>
-      html, body, [data-testid="stAppViewContainer"] {
-        background: linear-gradient(180deg,#0a1f0f,#08210c);
-        color:#eafbea;
-      }
-      .card { background: rgba(255,255,255,0.06); border: 1px solid #134e29;
-              border-radius: 16px; padding: 12px 16px; box-shadow: 0 6px 18px rgba(0,0,0,0.25); margin-bottom:10px; }
-      .badge-gold { background:#FFF4C2; color:#000; border:1px solid #111; padding:4px 10px; border-radius:999px; font-weight:700; }
-      .welcome-wrap { width:100%; text-align:right; margin-top:-6px; margin-bottom:6px; color:#eafbea; opacity:0.9; }
-    </style>
-    """, unsafe_allow_html=True)
-
-def show_welcome_top_right(name: str, lang: str):
-    if not name: return
-    label = f"Welcome, <b>{name}</b>" if lang=="en" else f"مرحبًا، <b>{name}</b>"
-    st.markdown(f"""<div class="welcome-wrap">{label}</div>""", unsafe_allow_html=True)
-
-# safe logo renderer
-def show_logo_safe(img_ref, width=56, caption=""):
-    try:
-        if not img_ref or (isinstance(img_ref, float) and pd.isna(img_ref)):
-            return
-        s = str(img_ref).strip()
-        if not s:
-            return
-        if s.startswith("http://") or s.startswith("https://") or os.path.exists(s):
-            st.image(s, width=width, caption=caption)
-    except Exception:
-        pass
-
-# ---------- Play & Leaderboard (reuse code from earlier, using load_csv/save_csv) ----------
+    # -------- Admin Login (fixed) --------
+    if role == tr(LANG_CODE, "admin_login"):
+        st.subheader(tr(LANG_CODE, "admin_login"))
+        pwd = st.text_input(tr(LANG_CODE, "admin_pass"), type="password", key="admin_pw")
+        if st.button(tr(LANG_CODE, "login"), key="btn_admin_login"):
+            if pwd == ADMIN_PASSWORD:
+                st.session_state["role"] = "admin"
+                st.session_state["current_name"] = "Admin"
+                st.success(tr(LANG_CODE, "admin_ok"))
+                st.rerun()
+            else:
+                st.error(tr(LANG_CODE, "admin_bad"))
+# ─────────────────────────────
+# Play & Leaderboard (User)
+# ─────────────────────────────
 def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
     apply_theme()
 
-    # Season title (if any)
     season_name = ""
     if os.path.exists(SEASON_FILE):
         try:
@@ -1213,7 +1252,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
         st.dataframe(view[["Match","Round","Occasion","Result","RealWinner","Kickoff","CompletedAt"]], use_container_width=True)
 
     st.markdown("---")
-    # Registered Users + Terminate + Delete (keeps your existing delete feature)
+    # Registered Users + Terminate + Delete (your delete feature kept)
     st.markdown(f"### {tr(LANG_CODE,'registered_users')}")
     users_df = load_users()
     if users_df.empty:
@@ -1246,7 +1285,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     save_users(users_df)
                     st.success(tr(LANG_CODE,"terminated"))
 
-        # Delete user button (keeps existing behavior)
+        # Delete user (kept exactly as requested)
         st.markdown(" ")
         del_col1, del_col2 = st.columns([2,1])
         with del_col1:
@@ -1264,7 +1303,9 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     st.success("User deleted." if LANG_CODE=="en" else "تم حذف المستخدم.")
                     st.rerun()
 
+# ─────────────────────────────
 # Router & bootstrap
+# ─────────────────────────────
 def run_app():
     st.sidebar.subheader(tr('en','sidebar_lang') + " / " + tr('ar','sidebar_lang'))
     lang_choice = st.sidebar.radio("", [tr('en','lang_en'), tr('ar','lang_ar')], index=0, horizontal=True)
