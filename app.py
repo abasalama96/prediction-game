@@ -1208,7 +1208,9 @@ def run_app():
         st.session_state.pop("current_name", None)
         st.rerun()
 
-    role = st.session_state.get("role")
+    # ⬇️ Make sure role is defined BEFORE using it
+    role = st.session_state.get("role", None)
+
     if role == "user":
         page_play_and_leaderboard(LANG_CODE, tz)
     elif role == "admin":
@@ -1217,8 +1219,9 @@ def run_app():
         page_login(LANG_CODE)
 
 # Run
-try:
-    run_app()
-except Exception as e:
-    st.error("App crashed")
-    st.exception(e)
+if __name__ == "__main__":
+    try:
+        run_app()
+    except Exception as e:
+        st.error("App crashed")
+        st.exception(e)
