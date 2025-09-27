@@ -23,7 +23,6 @@ TEAM_LOGOS_FILE    = os.path.join(DATA_DIR, "team_logos.json")
 LOGO_DIR           = os.path.join(DATA_DIR, "logos")
 os.makedirs(LOGO_DIR, exist_ok=True)
 
-# For security, consider: ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "madness")
 ADMIN_PASSWORD = "madness"
 
 # ─────────────────────────────
@@ -391,7 +390,7 @@ def show_welcome_top_right(name: str, lang: str):
     label = f"Welcome, <b>{name}</b>" if lang=="en" else f"مرحبًا، <b>{name}</b>"
     st.markdown(f"""<div class="welcome-wrap">{label}</div>""", unsafe_allow_html=True)
 
-# --- Browser time zone detection + query param bridge (NEW) ---
+# --- Browser time zone detection + query param bridge (uses st.query_params) ---
 def _setup_browser_timezone_param():
     """
     Detects the browser time zone with JS and stores it in the URL (?tz=...).
@@ -414,11 +413,9 @@ def _setup_browser_timezone_param():
 
 def _get_tz_from_query_params(default_tz="Asia/Riyadh"):
     try:
-        # New API: st.query_params is a dict-like mapping of strings -> strings
         return st.query_params.get("tz", default_tz) or default_tz
     except Exception:
         return default_tz
-
 # ─────────────────────────────
 # Users (Name + PIN)
 # ─────────────────────────────
@@ -464,7 +461,6 @@ def normalize_score_pair(score_str: str) -> tuple[int,int] | None:
 def get_real_winner(match_row: pd.Series) -> str:
     rw = str(match_row.get("RealWinner") or "").strip()
     if rw:
-        # Normalize draw Arabic/English
         if rw.casefold() in {"draw", "تعادل"}:
             return "Draw"
         return rw
@@ -566,7 +562,6 @@ def page_login(LANG_CODE: str):
     )
 
     if role == tr(LANG_CODE, "user_login"):
-
         users_df = load_users()
         st.subheader(tr(LANG_CODE, "user_login"))
         name_in = st.text_input(tr(LANG_CODE, "your_name"), key="login_name")
@@ -1173,9 +1168,9 @@ def run_app():
 
     st.sidebar.subheader(tr(LANG_CODE,'sidebar_time'))
 
-    # (NEW) Auto-detect browser TZ + allow override, persist in URL
+    # Auto-detect browser TZ + allow override, persist in URL (using st.query_params)
     _setup_browser_timezone_param()
-    detected_tz = _get_tz_from_query_params(default_tz="Asia/Riyadh")
+    detected_tz = _get_tz_from_query_params(default_tz="Asia/Riyadh") or "Asia/Riyadh"
 
     common_tz = [
         "UTC",
@@ -1197,17 +1192,14 @@ def run_app():
     )
     tz_str = detected_tz if tz_choice == label_auto else tz_choice
 
-    # New API: set the param via st.query_params
-try:
-    # Prefer in-place set (works on recent Streamlit)
-    st.query_params["tz"] = tz_str
-except Exception:
+    # Save choice back to URL (new API)
     try:
-        # Fallback: assign a whole dict if needed (overwrites other params)
-        st.query_params = {"tz": tz_str}
+        st.query_params["tz"] = tz_str
     except Exception:
-        pass
-
+        try:
+            st.query_params = {"tz": tz_str}
+        except Exception:
+            pass
 
     tz = ZoneInfo(tz_str)
 
