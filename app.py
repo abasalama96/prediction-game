@@ -370,6 +370,22 @@ def ensure_history_schema(df: pd.DataFrame) -> pd.DataFrame:
         if c not in df.columns: df[c] = None
     return df[cols]
 
+# NEW: safe logo renderer (works for local paths & URLs, ignores bad images)
+def show_logo_safe(img_ref, width=56, caption=""):
+    """Render a logo whether it is a local file path or a URL; ignore unreadable images."""
+    try:
+        if not img_ref or (isinstance(img_ref, float) and pd.isna(img_ref)):
+            return
+        s = str(img_ref).strip()
+        if not s:
+            return
+        # Render only if it's a local file that exists, or a valid http(s) URL
+        if os.path.exists(s) or s.lower().startswith(("http://", "https://")):
+            st.image(s, width=width, caption=caption)
+    except Exception:
+        # Fail silently if the image can't be loaded
+        pass
+
 # theme
 def apply_theme():
     st.markdown("""
