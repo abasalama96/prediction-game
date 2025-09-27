@@ -564,7 +564,8 @@ def page_login(LANG_CODE: str):
         key="login_role_selector"
     )
 
-    if role == tr(LANG_CODE, "user_login")):
+    if role == tr(LANG_CODE, "user_login"):
+
         users_df = load_users()
         st.subheader(tr(LANG_CODE, "user_login"))
         name_in = st.text_input(tr(LANG_CODE, "your_name"), key="login_name")
