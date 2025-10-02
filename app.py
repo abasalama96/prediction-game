@@ -26,6 +26,76 @@ os.makedirs(LOGO_DIR, exist_ok=True)
 ADMIN_PASSWORD = "madness"
 
 # ─────────────────────────────
+# Backup / Restore helpers (Part A)
+# ─────────────────────────────
+import zipfile
+from io import BytesIO
+
+BACKUP_FILES = [
+    USERS_FILE,
+    MATCHES_FILE,
+    MATCH_HISTORY_FILE,
+    PREDICTIONS_FILE,
+    LEADERBOARD_FILE,
+    SEASON_FILE,
+    TEAM_LOGOS_FILE,
+]
+
+def create_backup_zip() -> BytesIO:
+    """Create an in-memory ZIP of all game data files."""
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        for path in BACKUP_FILES:
+            try:
+                if os.path.exists(path) and os.path.getsize(path) > 0:
+                    z.write(path, arcname=os.path.basename(path))
+            except Exception:
+                # ignore unreadable files
+                pass
+    buf.seek(0)
+    return buf
+
+def restore_from_zip(filelike) -> None:
+    """Extract ZIP into DATA_DIR, overwriting existing files (only known files)."""
+    with zipfile.ZipFile(filelike, "r") as z:
+        allowed = {os.path.basename(p) for p in BACKUP_FILES}
+        for member in z.namelist():
+            base = os.path.basename(member)
+            if base in allowed:
+                z.extract(member, DATA_DIR)
+
+# Optional: save backups to Supabase Storage if configured (silent no-op if not)
+def _get_supabase_client():
+    try:
+        from supabase import create_client
+        url = st.secrets.get("SUPABASE_URL")
+        key = st.secrets.get("SUPABASE_SERVICE_ROLE") or st.secrets.get("SUPABASE_ANON_KEY")
+        if not url or not key:
+            return None
+        return create_client(url, key)
+    except Exception:
+        return None
+
+def upload_backup_to_supabase(buf: BytesIO, bucket: str = "backups") -> str | None:
+    """
+    Upload the in-memory ZIP to Supabase Storage (if configured).
+    Returns 'bucket/key' on success, else None.
+    """
+    sb = _get_supabase_client()
+    if not sb:
+        return None
+    try:
+        sb.storage.create_bucket(bucket, public=False)
+    except Exception:
+        pass
+    ts = datetime.now(ZoneInfo("UTC")).strftime("%Y%m%d_%H%M%S")
+    key = f"prediction_backups/backup_{ts}.zip"
+    try:
+        sb.storage.from_(bucket).upload(key, buf.getvalue(), {"content-type": "application/zip"})
+        return f"{bucket}/{key}"
+    except Exception:
+        return None
+# ─────────────────────────────
 # i18n
 # ─────────────────────────────
 LANG = {
@@ -562,7 +632,6 @@ def recompute_leaderboard(predictions_df: pd.DataFrame) -> pd.DataFrame:
     lb = lb.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False])
     save_csv(lb, LEADERBOARD_FILE)
     return lb
-
 # ─────────────────────────────
 # Auth pages
 # ─────────────────────────────
@@ -646,6 +715,7 @@ def page_login(LANG_CODE: str):
                 st.rerun()
             else:
                 st.error(tr(LANG_CODE, "admin_bad"))
+
 # ─────────────────────────────
 # Play & Leaderboard (User)
 # ─────────────────────────────
@@ -792,7 +862,6 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
             }
             show = lb[[tr(LANG_CODE,"lb_rank"), "User","Predictions","Exact","Outcome","Points"]].rename(columns=col_map)
             st.dataframe(show, use_container_width=True)
-
 # ─────────────────────────────
 # Admin Page (split: Save Details / Save Score) + logo previews in Add Match
 # ─────────────────────────────
@@ -894,6 +963,29 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                 m = pd.concat([m, row], ignore_index=True)
             save_csv(m, MATCHES_FILE)
             st.success(tr(LANG_CODE,"test_done"))
+
+    # 📦 Backup & Restore (Part B)
+    st.markdown("### 📦 Backup & Restore")
+    bcol1, bcol2 = st.columns([1,1])
+    with bcol1:
+        if st.button("⬇️ Backup Now", key="btn_backup_now"):
+            buf = create_backup_zip()
+            st.download_button(
+                "Download backup.zip",
+                data=buf.getvalue(),
+                file_name="prediction_backup.zip",
+                mime="application/zip",
+                key="dl_backup_zip"
+            )
+            loc = upload_backup_to_supabase(buf)
+            if loc:
+                st.info(f"Also saved to Supabase Storage at: {loc}")
+    with bcol2:
+        up = st.file_uploader("⬆️ Restore from backup.zip", type="zip", key="upload_restore_zip")
+        if up and st.button("Restore Now", key="btn_restore_now"):
+            restore_from_zip(up)
+            st.success("Backup restored. Please reload the app.")
+            st.rerun()
 
     st.markdown("---")
     # Add match (with live logo previews)
@@ -1174,7 +1266,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     save_users(users_df)
                     st.success("User deleted." if LANG_CODE=="en" else "تم حذف المستخدم.")
                     st.rerun()
-# ─────────────────────────────
+                    # ─────────────────────────────
 # Router & bootstrap
 # ─────────────────────────────
 def run_app():
@@ -1184,7 +1276,7 @@ def run_app():
 
     st.sidebar.subheader(tr(LANG_CODE,'sidebar_time'))
 
-    # Auto-detect browser TZ + allow override, persist in URL (using st.query_params)
+    # Auto-detect browser TZ + allow override, persist in URL (?tz=...)
     _setup_browser_timezone_param()
     detected_tz = _get_tz_from_query_params(default_tz="Asia/Riyadh") or "Asia/Riyadh"
 
@@ -1208,7 +1300,7 @@ def run_app():
     )
     tz_str = detected_tz if tz_choice == label_auto else tz_choice
 
-    # Save choice back to URL (new API)
+    # Save choice back to URL using the new API
     try:
         st.query_params["tz"] = tz_str
     except Exception:
@@ -1224,7 +1316,6 @@ def run_app():
         st.session_state.pop("current_name", None)
         st.rerun()
 
-    # ⬇️ Make sure role is defined BEFORE using it
     role = st.session_state.get("role", None)
 
     if role == "user":
