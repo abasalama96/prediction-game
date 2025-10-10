@@ -575,7 +575,7 @@ def points_for_prediction(match_row: pd.Series, pred: str, big_game: bool, chose
 
     # exact
     if real_pair == pred_pair:
-        return (5 if big_game else 3, 1, 0)
+        return (6 if big_game else 3, 1, 0)
 
     # outcome (winner/draw)
     real_w = get_real_winner(match_row)
