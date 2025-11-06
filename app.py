@@ -23,6 +23,9 @@ TEAM_LOGOS_FILE    = os.path.join(DATA_DIR, "team_logos.json")
 LOGO_DIR           = os.path.join(DATA_DIR, "logos")
 os.makedirs(LOGO_DIR, exist_ok=True)
 
+# NEW: overrides store for manual admin edits (Predictions & Points)
+LEADERBOARD_OVERRIDES_FILE = os.path.join(DATA_DIR, "leaderboard_overrides.csv")
+
 ADMIN_PASSWORD = "madness"
 
 # ─────────────────────────────
@@ -95,6 +98,7 @@ def upload_backup_to_supabase(buf: BytesIO, bucket: str = "backups") -> str | No
         return f"{bucket}/{key}"
     except Exception:
         return None
+
 # ─────────────────────────────
 # i18n
 # ─────────────────────────────
@@ -283,7 +287,7 @@ LANG = {
         "match_history": "سجل المباريات (للمشرف فقط)",
         "registered_users": "المستخدمون المسجّلون",
         "terminate": "إيقاف",
-        "terminated": "تم إيقاف المستخدم.",
+        "terminated": "تم إيقاف المستخدم。",
     }
 }
 
@@ -291,7 +295,6 @@ def tr(lang, key, **kwargs):
     d = LANG["ar" if lang == "ar" else "en"]
     txt = d.get(key, key)
     return txt.format(**kwargs) if kwargs else txt
-
 # ─────────────────────────────
 # Utilities & persistence
 # ─────────────────────────────
@@ -440,6 +443,13 @@ def ensure_history_schema(df: pd.DataFrame) -> pd.DataFrame:
         if c not in df.columns: df[c] = None
     return df[cols]
 
+# NEW (for manual admin overrides file)
+def load_overrides() -> pd.DataFrame:
+    return load_csv(LEADERBOARD_OVERRIDES_FILE, ["User","Predictions","Points"])
+
+def save_overrides(df: pd.DataFrame):
+    save_csv(df, LEADERBOARD_OVERRIDES_FILE)
+
 # NEW: safe logo renderer (works for local paths & URLs, ignores bad images)
 def show_logo_safe(img_ref, width=56, caption=""):
     """Render a logo whether it is a local file path or a URL; ignore unreadable images."""
@@ -502,6 +512,7 @@ def _get_tz_from_query_params(default_tz="Asia/Riyadh"):
         return st.query_params.get("tz", default_tz) or default_tz
     except Exception:
         return default_tz
+
 # ─────────────────────────────
 # Users (Name + PIN)
 # ─────────────────────────────
@@ -1197,7 +1208,6 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                         save_csv(p, PREDICTIONS_FILE)
                     st.success(tr(LANG_CODE,"deleted"))
                     st.rerun()
-
     st.markdown("---")
     # Match History (Admin only)
     st.markdown(f"### {tr(LANG_CODE,'match_history')}")
@@ -1266,7 +1276,126 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     save_users(users_df)
                     st.success("User deleted." if LANG_CODE=="en" else "تم حذف المستخدم.")
                     st.rerun()
-                    # ─────────────────────────────
+
+    # ─────────────────────────────
+    # NEW SECTION A: 👀 View Users’ Predictions
+    # ─────────────────────────────
+    st.markdown("---")
+    st.markdown("### 👀 View Users’ Predictions")
+
+    preds_view = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+    matches_view = load_csv(MATCHES_FILE, ["Match","Kickoff","Result","Round"])
+    hist_view = load_csv(MATCH_HISTORY_FILE, ["Match","Kickoff","Result","Round","CompletedAt"])
+
+    all_matches_for_view = pd.concat([
+        matches_view.assign(Status="Open"),
+        hist_view.drop(columns=["CompletedAt"], errors="ignore").assign(Status="Closed")
+    ], ignore_index=True)
+
+    df_preds_full = preds_view.merge(
+        all_matches_for_view[["Match","Kickoff","Result","Round","Status"]],
+        on="Match", how="left"
+    )
+    df_preds_full["SubmittedAt"] = pd.to_datetime(df_preds_full["SubmittedAt"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M")
+    df_preds_full["Kickoff"] = df_preds_full["Kickoff"].apply(parse_iso_dt)
+
+    col_f1, col_f2 = st.columns([1,1])
+    with col_f1:
+        user_filter = st.selectbox("Filter by user", options=["(All)"] + sorted(df_preds_full["User"].dropna().unique().tolist()))
+    with col_f2:
+        status_filter = st.selectbox("Filter by match status", options=["(All)","Open","Closed"])
+
+    view_df = df_preds_full.copy()
+    if user_filter != "(All)":
+        view_df = view_df[view_df["User"] == user_filter]
+    if status_filter != "(All)":
+        view_df = view_df[view_df["Status"] == status_filter]
+
+    view_df = view_df.sort_values(["User","Match","SubmittedAt"])
+    show_cols = ["User","Match","Prediction","Winner","Result","Round","Status","SubmittedAt"]
+    st.dataframe(view_df[show_cols], use_container_width=True)
+
+    # ─────────────────────────────
+    # NEW SECTION B: ✏️ Manual Edit: Predictions & Points
+    # ─────────────────────────────
+    st.markdown("---")
+    st.markdown("### ✏️ Manual Edit: Predictions & Points")
+
+    preds_now_for_edit = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+    lb_current = recompute_leaderboard(preds_now_for_edit).copy()
+    overrides = load_overrides()
+
+    merged = lb_current.merge(overrides, on="User", how="left", suffixes=("", "_ovr"))
+
+    def _coalesce(a, b):
+        return b if pd.notna(b) else a
+
+    merged["Predictions"] = merged.apply(lambda r: _coalesce(r.get("Predictions"), r.get("Predictions_ovr")), axis=1)
+    merged["Points"]      = merged.apply(lambda r: _coalesce(r.get("Points"),      r.get("Points_ovr")), axis=1)
+
+    merged = merged.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False]).reset_index(drop=True)
+    merged.insert(0, tr(LANG_CODE,"lb_rank"), range(1, len(merged) + 1))
+
+    col_map = {
+        "User": tr(LANG_CODE,"lb_user"),
+        "Predictions": tr(LANG_CODE,"lb_preds"),
+        "Exact": tr(LANG_CODE,"lb_exact"),
+        "Outcome": tr(LANG_CODE,"lb_outcome"),
+        "Points": tr(LANG_CODE,"lb_points"),
+    }
+    preview = merged[[tr(LANG_CODE,"lb_rank"), "User","Predictions","Exact","Outcome","Points"]].rename(columns=col_map)
+    st.dataframe(preview, use_container_width=True)
+
+    st.markdown("#### Edit an entry")
+    if lb_current.empty:
+        st.info(tr(LANG_CODE,"no_scores_yet"))
+    else:
+        edit_col1, edit_col2, edit_col3, edit_col4 = st.columns([2,1,1,1])
+        with edit_col1:
+            user_pick = st.selectbox("User", options=lb_current["User"].tolist())
+        with edit_col2:
+            new_preds = st.number_input("Predictions (override)", min_value=0, value=int(lb_current.loc[lb_current["User"]==user_pick, "Predictions"].iloc[0]))
+        with edit_col3:
+            new_points = st.number_input("Points (override)", min_value=0, value=int(lb_current.loc[lb_current["User"]==user_pick, "Points"].iloc[0]))
+        with edit_col4:
+            if st.button("Save Override"):
+                o = load_overrides()
+                if not o.empty and (o["User"] == user_pick).any():
+                    o.loc[o["User"] == user_pick, ["Predictions","Points"]] = [int(new_preds), int(new_points)]
+                else:
+                    o = pd.concat([o, pd.DataFrame([{"User": user_pick, "Predictions": int(new_preds), "Points": int(new_points)}])], ignore_index=True)
+                save_overrides(o)
+                st.success("Override saved.")
+                st.rerun()
+
+    util_c1, util_c2, util_c3 = st.columns([1,1,1])
+    with util_c1:
+        if st.button("Clear Override for Selected User"):
+            if 'user_pick' in locals():
+                o = load_overrides()
+                o = o[o["User"] != user_pick]
+                save_overrides(o)
+                st.success("Override cleared.")
+                st.rerun()
+    with util_c2:
+        if st.button("Clear ALL Overrides"):
+            save_overrides(pd.DataFrame(columns=["User","Predictions","Points"]))
+            st.success("All overrides cleared.")
+            st.rerun()
+    with util_c3:
+        if st.button("Apply Overrides → Write Leaderboard.csv"):
+            applied = lb_current.merge(load_overrides(), on="User", how="left", suffixes=("", "_ovr"))
+            applied["Predictions"] = applied.apply(lambda r: _coalesce(r.get("Predictions"), r.get("Predictions_ovr")), axis=1)
+            applied["Points"]      = applied.apply(lambda r: _coalesce(r.get("Points"),      r.get("Points_ovr")), axis=1)
+            applied = applied[["User","Points","Predictions","Exact","Outcome"]]
+            applied = applied.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False])
+            save_csv(applied, LEADERBOARD_FILE)
+            st.success("Applied overrides to leaderboard.csv")
+    # end of page_admin sections
+    # (nothing else below; keep function scope)
+    return
+
+# ─────────────────────────────
 # Router & bootstrap
 # ─────────────────────────────
 def run_app():
