@@ -287,7 +287,7 @@ LANG = {
         "match_history": "سجل المباريات (للمشرف فقط)",
         "registered_users": "المستخدمون المسجّلون",
         "terminate": "إيقاف",
-        "terminated": "تم إيقاف المستخدم。",
+        "terminated": "تم إيقاف المستخدم.",
     }
 }
 
@@ -321,6 +321,13 @@ def load_csv(file, cols):
 
 def save_csv(df, file):
     df.to_csv(file, index=False)
+
+# NEW: helper for manual overrides storage
+def load_overrides() -> pd.DataFrame:
+    return load_csv(LEADERBOARD_OVERRIDES_FILE, ["User","Predictions","Points"])
+
+def save_overrides(df: pd.DataFrame):
+    save_csv(df, LEADERBOARD_OVERRIDES_FILE)
 
 def _hash_pin(pin: str) -> str:
     salt = secrets.token_hex(8)
@@ -374,7 +381,6 @@ def human_delta(delta: timedelta, lang: str) -> str:
     parts.append(f"{hours} {'hour' if hours==1 else 'hours'}")
     parts.append(f"{minutes} {'minute' if minutes==1 else 'minutes'}")
     return " ".join(parts)
-
 # logo helpers
 def _filename_from_url(url: str) -> str:
     parsed = urlparse(url)
@@ -443,27 +449,17 @@ def ensure_history_schema(df: pd.DataFrame) -> pd.DataFrame:
         if c not in df.columns: df[c] = None
     return df[cols]
 
-# NEW (for manual admin overrides file)
-def load_overrides() -> pd.DataFrame:
-    return load_csv(LEADERBOARD_OVERRIDES_FILE, ["User","Predictions","Points"])
-
-def save_overrides(df: pd.DataFrame):
-    save_csv(df, LEADERBOARD_OVERRIDES_FILE)
-
-# NEW: safe logo renderer (works for local paths & URLs, ignores bad images)
+# safe logo renderer
 def show_logo_safe(img_ref, width=56, caption=""):
-    """Render a logo whether it is a local file path or a URL; ignore unreadable images."""
     try:
         if not img_ref or (isinstance(img_ref, float) and pd.isna(img_ref)):
             return
         s = str(img_ref).strip()
         if not s:
             return
-        # Render only if it's a local file that exists, or a valid http(s) URL
         if os.path.exists(s) or s.lower().startswith(("http://", "https://")):
             st.image(s, width=width, caption=caption)
     except Exception:
-        # Fail silently if the image can't be loaded
         pass
 
 # theme
@@ -486,12 +482,8 @@ def show_welcome_top_right(name: str, lang: str):
     label = f"Welcome, <b>{name}</b>" if lang=="en" else f"مرحبًا، <b>{name}</b>"
     st.markdown(f"""<div class="welcome-wrap">{label}</div>""", unsafe_allow_html=True)
 
-# --- Browser time zone detection + query param bridge (uses st.query_params) ---
+# browser timezone detection
 def _setup_browser_timezone_param():
-    """
-    Detects the browser time zone with JS and stores it in the URL (?tz=...).
-    No reloads; just updates the address bar so Streamlit can read it.
-    """
     import streamlit.components.v1 as components
     components.html("""
     <script>
@@ -512,7 +504,6 @@ def _get_tz_from_query_params(default_tz="Asia/Riyadh"):
         return st.query_params.get("tz", default_tz) or default_tz
     except Exception:
         return default_tz
-
 # ─────────────────────────────
 # Users (Name + PIN)
 # ─────────────────────────────
@@ -575,7 +566,7 @@ def get_real_winner(match_row: pd.Series) -> str:
     return team_a if r_a > r_b else team_b
 
 def points_for_prediction(match_row: pd.Series, pred: str, big_game: bool, chosen_winner: str) -> tuple[int,int,int]:
-    """(points, exact_flag, outcome_flag) — exact is order-insensitive; outcome uses admin 'RealWinner' or draw."""
+    """(points, exact_flag, outcome_flag)"""
     real = match_row.get("Result")
     if not isinstance(real, str) or not isinstance(pred, str):
         return (0,0,0)
@@ -588,7 +579,7 @@ def points_for_prediction(match_row: pd.Series, pred: str, big_game: bool, chose
     if real_pair == pred_pair:
         return (6 if big_game else 3, 1, 0)
 
-    # outcome (winner/draw)
+    # outcome
     real_w = get_real_winner(match_row)
     pred_draw = (pred_pair[0] == pred_pair[1])
     if real_w == "Draw" and pred_draw:
@@ -873,8 +864,8 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
             }
             show = lb[[tr(LANG_CODE,"lb_rank"), "User","Predictions","Exact","Outcome","Points"]].rename(columns=col_map)
             st.dataframe(show, use_container_width=True)
-# ─────────────────────────────
-# Admin Page (split: Save Details / Save Score) + logo previews in Add Match
+            # ─────────────────────────────
+# Admin Page (includes NEW features)
 # ─────────────────────────────
 def page_admin(LANG_CODE: str, tz: ZoneInfo):
     apply_theme()
@@ -975,7 +966,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
             save_csv(m, MATCHES_FILE)
             st.success(tr(LANG_CODE,"test_done"))
 
-    # 📦 Backup & Restore (Part B)
+    # 📦 Backup & Restore
     st.markdown("### 📦 Backup & Restore")
     bcol1, bcol2 = st.columns([1,1])
     with bcol1:
@@ -1208,6 +1199,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                         save_csv(p, PREDICTIONS_FILE)
                     st.success(tr(LANG_CODE,"deleted"))
                     st.rerun()
+
     st.markdown("---")
     # Match History (Admin only)
     st.markdown(f"### {tr(LANG_CODE,'match_history')}")
@@ -1259,7 +1251,6 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     save_users(users_df)
                     st.success(tr(LANG_CODE,"terminated"))
 
-        # Hard delete user (kept)
         st.markdown(" ")
         del_col1, del_col2 = st.columns([2,1])
         with del_col1:
@@ -1391,8 +1382,8 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
             applied = applied.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False])
             save_csv(applied, LEADERBOARD_FILE)
             st.success("Applied overrides to leaderboard.csv")
-    # end of page_admin sections
-    # (nothing else below; keep function scope)
+
+    # end of admin page
     return
 
 # ─────────────────────────────
@@ -1405,7 +1396,6 @@ def run_app():
 
     st.sidebar.subheader(tr(LANG_CODE,'sidebar_time'))
 
-    # Auto-detect browser TZ + allow override, persist in URL (?tz=...)
     _setup_browser_timezone_param()
     detected_tz = _get_tz_from_query_params(default_tz="Asia/Riyadh") or "Asia/Riyadh"
 
@@ -1429,7 +1419,6 @@ def run_app():
     )
     tz_str = detected_tz if tz_choice == label_auto else tz_choice
 
-    # Save choice back to URL using the new API
     try:
         st.query_params["tz"] = tz_str
     except Exception:
