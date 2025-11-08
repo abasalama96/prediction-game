@@ -598,14 +598,23 @@ def _load_all_matches_for_scoring() -> pd.DataFrame:
     return pd.concat([open_m, hist_m], ignore_index=True)
 
 def recompute_leaderboard(predictions_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rebuild leaderboard from predictions, then apply manual overrides (if any)
+    to Points and Predictions before sorting and saving. This makes overrides
+    reflect everywhere the leaderboard is used.
+    """
     cols = ["User","Points","Predictions","Exact","Outcome"]
     lb = pd.DataFrame(columns=cols)
+
+    # No predictions = empty leaderboard (still save empty for consistency)
     if predictions_df.empty:
-        save_csv(lb, LEADERBOARD_FILE); return lb
+        save_csv(lb, LEADERBOARD_FILE)
+        return lb
 
     matches_full = _load_all_matches_for_scoring()
     if matches_full.empty:
-        save_csv(lb, LEADERBOARD_FILE); return lb
+        save_csv(lb, LEADERBOARD_FILE)
+        return lb
 
     preds = predictions_df.copy()
     preds["SubmittedAt"] = pd.to_datetime(preds["SubmittedAt"], errors="coerce")
@@ -615,25 +624,51 @@ def recompute_leaderboard(predictions_df: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for _, p in latest.iterrows():
         mrow = matches_full[matches_full["Match"] == p["Match"]]
-        if mrow.empty: continue
+        if mrow.empty:
+            continue
         m = mrow.iloc[0]
         real = m["Result"]
-        if not isinstance(real, str) or "-" not in str(real): continue
-        big = bool(m["BigGame"])
+        if not isinstance(real, str) or "-" not in str(real):
+            continue
+        big = bool(m.get("BigGame", False))
         chosen_winner = str(p.get("Winner") or "")
         pts, ex, out = points_for_prediction(m, str(p["Prediction"]), big, chosen_winner)
         rows.append({"User": p["User"], "Points": pts, "Exact": ex, "Outcome": out})
 
     if not rows:
-        save_csv(lb, LEADERBOARD_FILE); return lb
+        save_csv(lb, LEADERBOARD_FILE)
+        return lb
 
     per = pd.DataFrame(rows)
     lb = (per.groupby("User", as_index=False)
-            .agg(Points=("Points","sum"), Predictions=("Points","count"),
-                 Exact=("Exact","sum"), Outcome=("Outcome","sum")))
-    lb = lb.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False])
+            .agg(Points=("Points","sum"),
+                 Predictions=("Points","count"),
+                 Exact=("Exact","sum"),
+                 Outcome=("Outcome","sum")))
+
+    # 👉 Apply overrides (Predictions / Points) BEFORE sorting & saving
+    ovr = load_overrides()
+    if not ovr.empty:
+        lb = lb.merge(ovr, on="User", how="left", suffixes=("", "_ovr"))
+
+        def _coalesce(base_val, ovr_val):
+            try:
+                # if override is NaN, keep base
+                return int(ovr_val) if pd.notna(ovr_val) else int(base_val)
+            except Exception:
+                return base_val
+
+        lb["Predictions"] = lb.apply(lambda r: _coalesce(r["Predictions"], r.get("Predictions_ovr")), axis=1)
+        lb["Points"]      = lb.apply(lambda r: _coalesce(r["Points"],       r.get("Points_ovr")), axis=1)
+
+        # keep final columns only
+        lb = lb[["User","Points","Predictions","Exact","Outcome"]]
+
+    # Final sort & persist
+    lb = lb.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False]).reset_index(drop=True)
     save_csv(lb, LEADERBOARD_FILE)
     return lb
+
 # ─────────────────────────────
 # Auth pages
 # ─────────────────────────────
@@ -1450,3 +1485,4 @@ if __name__ == "__main__":
     except Exception as e:
         st.error("App crashed")
         st.exception(e)
+
