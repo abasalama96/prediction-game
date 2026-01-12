@@ -1,7 +1,3 @@
-
-# =========================
-# app.py  (PART 1 / 6)
-# =========================
 import os, re, json, hashlib, secrets
 from datetime import datetime, date, time as dtime, timedelta
 from zoneinfo import ZoneInfo
@@ -225,7 +221,6 @@ def tr(lang, key, **kwargs):
     d = LANG["ar" if lang == "ar" else "en"]
     txt = d.get(key, key)
     return txt.format(**kwargs) if kwargs else txt
-
 # ─────────────────────────────
 # Utilities & persistence
 # ─────────────────────────────
@@ -268,50 +263,12 @@ def _verify_pin(stored: str | None, pin: str) -> bool:
         return hashlib.sha256((salt + pin).encode("utf-8")).hexdigest() == h
     except Exception:
         return False
-    
- # ─────────────────────────────
-# OTP reset helpers (Admin issues OTP; user resets PIN)
-# ─────────────────────────────
-def _hash_otp(code: str) -> str:
-    salt = secrets.token_hex(8)
-    h = hashlib.sha256((salt + code).encode("utf-8")).hexdigest()
-    return f"{salt}:{h}"
-
-def _verify_otp(stored: str | None, code: str) -> bool:
-    try:
-        if stored is None: 
-            return False
-        if isinstance(stored, float) and pd.isna(stored): 
-            return False
-        s = str(stored)
-        if ":" not in s: 
-            return False
-        salt, h = s.split(":", 1)
-        return hashlib.sha256((salt + code).encode("utf-8")).hexdigest() == h
-    except Exception:
-        return False
-
-def _generate_otp_code() -> str:
-    # 6 digits OTP
-    return f"{secrets.randbelow(1_000_000):06d}"
-
-def _otp_is_valid(user_row: pd.Series) -> bool:
-    exp = user_row.get("ResetOTPExpiresAt")
-    dt = parse_iso_dt(exp)
-    if not dt:
-        return False
-    # stored in UTC
-    return datetime.now(ZoneInfo("UTC")) <= dt.replace(tzinfo=ZoneInfo("UTC")) if dt.tzinfo is None else datetime.now(ZoneInfo("UTC")) <= dt
-   
 
 def parse_iso_dt(val):
     try:
         return datetime.fromisoformat(str(val)) if pd.notna(val) and val else None
     except Exception:
         return None
-# =========================
-# app.py  (PART 2 / 6)
-# =========================
 
 def to_tz(dt: datetime | None, tz: ZoneInfo) -> datetime | None:
     if not dt: return None
@@ -412,7 +369,7 @@ def ensure_history_schema(df: pd.DataFrame) -> pd.DataFrame:
         if c not in df.columns: df[c] = None
     return df[cols]
 
-# NEW: safe logo renderer (works for local paths & URLs, ignores bad images)
+# safe logo renderer
 def show_logo_safe(img_ref, width=56, caption=""):
     """Render a logo whether it is a local file path or a URL; ignore unreadable images."""
     try:
@@ -421,11 +378,9 @@ def show_logo_safe(img_ref, width=56, caption=""):
         s = str(img_ref).strip()
         if not s:
             return
-        # Render only if it's a local file that exists, or a valid http(s) URL
         if os.path.exists(s) or s.lower().startswith(("http://", "https://")):
             st.image(s, width=width, caption=caption)
     except Exception:
-        # Fail silently if the image can't be loaded
         pass
 
 # theme
@@ -474,16 +429,11 @@ def _get_tz_from_query_params(default_tz="Asia/Riyadh"):
         return st.query_params.get("tz", default_tz) or default_tz
     except Exception:
         return default_tz
-# =========================
-# app.py  (PART 3 / 6)
-# =========================
-
 # ─────────────────────────────
 # Users (Name + PIN)
 # ─────────────────────────────
 def load_users():
-    cols = ["Name","CreatedAt","IsBanned","PinHash","ResetOTPHash","ResetOTPExpiresAt"]
-
+    cols = ["Name","CreatedAt","IsBanned","PinHash"]
     if os.path.exists(USERS_FILE) and os.path.getsize(USERS_FILE) > 0:
         df = pd.read_csv(USERS_FILE)
         for c in cols:
@@ -495,8 +445,7 @@ def load_users():
     return pd.DataFrame(columns=cols)
 
 def save_users(df):
-    cols = ["Name","CreatedAt","IsBanned","PinHash","ResetOTPHash","ResetOTPExpiresAt"]
-
+    cols = ["Name","CreatedAt","IsBanned","PinHash"]
     for c in cols:
         if c not in df.columns: df[c] = None
     df["IsBanned"] = pd.to_numeric(df.get("IsBanned", 0), errors="coerce").fillna(0).astype(int)
@@ -542,11 +491,7 @@ def get_real_winner(match_row: pd.Series) -> str:
     return team_a if r_a > r_b else team_b
 
 def points_for_prediction(match_row: pd.Series, pred: str, big_game: bool, chosen_winner: str) -> tuple[int,int,int]:
-    """
-    (points, exact_flag, outcome_flag)
-    exact is order-insensitive; outcome uses admin 'RealWinner' or draw.
-    Golden match points are 6 for exact, 2 for outcome.
-    """
+    """(points, exact_flag, outcome_flag) — exact is order-insensitive; outcome uses admin 'RealWinner' or draw."""
     real = match_row.get("Result")
     if not isinstance(real, str) or not isinstance(pred, str):
         return (0,0,0)
@@ -557,7 +502,7 @@ def points_for_prediction(match_row: pd.Series, pred: str, big_game: bool, chose
 
     # exact
     if real_pair == pred_pair:
-        return (6 if big_game else 3, 1, 0)
+        return (5 if big_game else 3, 1, 0)
 
     # outcome (winner/draw)
     real_w = get_real_winner(match_row)
@@ -569,16 +514,12 @@ def points_for_prediction(match_row: pd.Series, pred: str, big_game: bool, chose
     return (0,0,0)
 
 def _load_all_matches_for_scoring() -> pd.DataFrame:
-    open_m = load_csv(MATCHES_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","MatchID"])
-    hist_m = load_csv(MATCH_HISTORY_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","CompletedAt","MatchID"])
+    open_m = load_csv(MATCHES_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round"])
+    hist_m = load_csv(MATCH_HISTORY_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","CompletedAt"])
     if not hist_m.empty:
         hist_m = hist_m.drop(columns=["CompletedAt"], errors="ignore")
     if open_m.empty and hist_m.empty:
-        return pd.DataFrame(columns=["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","MatchID"])
-    # Ensure schema
-    for df in (open_m, hist_m):
-        if "MatchID" not in df.columns:
-            df["MatchID"] = None
+        return pd.DataFrame(columns=["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round"])
     return pd.concat([open_m, hist_m], ignore_index=True)
 
 def recompute_leaderboard(predictions_df: pd.DataFrame) -> pd.DataFrame:
@@ -593,26 +534,16 @@ def recompute_leaderboard(predictions_df: pd.DataFrame) -> pd.DataFrame:
 
     preds = predictions_df.copy()
     preds["SubmittedAt"] = pd.to_datetime(preds["SubmittedAt"], errors="coerce")
-
-    # IMPORTANT: treat each match uniquely by MatchID (fallback to Match text if missing)
-    if "MatchID" not in preds.columns:
-        preds["MatchID"] = None
-
-    preds["_match_key"] = preds["MatchID"].fillna("") + "||" + preds["Match"].astype(str)
-    matches_full["_match_key"] = matches_full["MatchID"].fillna("").astype(str) + "||" + matches_full["Match"].astype(str)
-
-    preds = preds.sort_values(["User","_match_key","SubmittedAt"])
-    latest = preds.drop_duplicates(subset=["User","_match_key"], keep="last")
+    preds = preds.sort_values(["User","Match","SubmittedAt"])
+    latest = preds.drop_duplicates(subset=["User","Match"], keep="last")
 
     rows = []
     for _, p in latest.iterrows():
-        mrow = matches_full[matches_full["_match_key"] == p["_match_key"]]
-        if mrow.empty: 
-            continue
+        mrow = matches_full[matches_full["Match"] == p["Match"]]
+        if mrow.empty: continue
         m = mrow.iloc[0]
         real = m["Result"]
-        if not isinstance(real, str) or "-" not in str(real): 
-            continue
+        if not isinstance(real, str) or "-" not in str(real): continue
         big = bool(m["BigGame"])
         chosen_winner = str(p.get("Winner") or "")
         pts, ex, out = points_for_prediction(m, str(p["Prediction"]), big, chosen_winner)
@@ -628,10 +559,6 @@ def recompute_leaderboard(predictions_df: pd.DataFrame) -> pd.DataFrame:
     lb = lb.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False])
     save_csv(lb, LEADERBOARD_FILE)
     return lb
-# =========================
-# app.py  (PART 4 / 6)
-# =========================
-
 # ─────────────────────────────
 # Auth pages
 # ─────────────────────────────
@@ -655,46 +582,6 @@ def page_login(LANG_CODE: str):
         name_norm = (name_in or "").strip()
 
         if st.button(tr(LANG_CODE, "login"), key="btn_user_login"):
-                    st.markdown("---")
-        with st.expander("Forgot PIN? (OTP Reset)" if LANG_CODE=="en" else "نسيت الرقم السري؟ (OTP)"):
-            reset_name = st.text_input(tr(LANG_CODE, "your_name"), key="otp_reset_name")
-            otp_code = st.text_input("OTP (6 digits)" if LANG_CODE=="en" else "رمز OTP (6 أرقام)",
-                                     key="otp_reset_code")
-            new_pin = st.text_input("New 4-digit PIN" if LANG_CODE=="en" else "رقم سري جديد (4 أرقام)",
-                                    type="password", key="otp_new_pin")
-
-            if st.button("Reset PIN" if LANG_CODE=="en" else "تغيير الرقم السري", key="btn_reset_pin"):
-                users_df = load_users()
-                name_norm = (reset_name or "").strip()
-                otp_norm = normalize_digits((otp_code or "").strip())
-                pin_norm = normalize_digits((new_pin or "").strip())
-
-                if not name_norm:
-                    st.error(tr(LANG_CODE, "need_name"))
-                elif not re.fullmatch(r"\d{6}", otp_norm):
-                    st.error("OTP must be 6 digits." if LANG_CODE=="en" else "رمز OTP يجب أن يكون 6 أرقام.")
-                elif not re.fullmatch(r"\d{4}", pin_norm):
-                    st.error("PIN must be 4 digits." if LANG_CODE=="en" else "الرقم السري يجب أن يكون 4 أرقام.")
-                else:
-                    hit = users_df[users_df["Name"].astype(str).str.strip().str.casefold() == name_norm.casefold()]
-                    if hit.empty:
-                        st.error("User not found." if LANG_CODE=="en" else "المستخدم غير موجود.")
-                    else:
-                        row = hit.iloc[0]
-                        if int(row.get("IsBanned", 0)) == 1:
-                            st.error("User is banned." if LANG_CODE=="en" else "المستخدم محظور.")
-                        elif not _otp_is_valid(row):
-                            st.error("OTP expired or not issued." if LANG_CODE=="en" else "رمز OTP منتهي أو غير صادر.")
-                        elif not _verify_otp(row.get("ResetOTPHash"), otp_norm):
-                            st.error("Wrong OTP." if LANG_CODE=="en" else "رمز OTP غير صحيح.")
-                        else:
-                            # update PIN + clear OTP
-                            users_df.loc[hit.index, "PinHash"] = _hash_pin(pin_norm)
-                            users_df.loc[hit.index, "ResetOTPHash"] = None
-                            users_df.loc[hit.index, "ResetOTPExpiresAt"] = None
-                            save_users(users_df)
-                            st.success("PIN updated. Please login." if LANG_CODE=="en" else "تم تغيير الرقم السري. سجل الدخول الآن.")
-
             if not name_norm or not re.fullmatch(r"\d{4}", normalize_digits(pin_in or "")):
                 st.error(tr(LANG_CODE, "please_login_first"))
             else:
@@ -774,12 +661,8 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
     st.title(f"{tr(LANG_CODE, 'app_title')}" + (f" — {season_name}" if season_name else ""))
     show_welcome_top_right(st.session_state.get("current_name"), LANG_CODE)
 
-    matches_df = load_csv(MATCHES_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","MatchID"])
-    predictions_df = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt","MatchID"])
-
-    # ensure schema
-    if "MatchID" not in matches_df.columns: matches_df["MatchID"] = None
-    if "MatchID" not in predictions_df.columns: predictions_df["MatchID"] = None
+    matches_df = load_csv(MATCHES_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round"])
+    predictions_df = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
 
     tab1, tab2 = st.tabs([f"🎮 {tr(LANG_CODE,'tab_play')}", f"🏆 {tr(LANG_CODE,'tab_leaderboard')}"])
 
@@ -795,7 +678,6 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
 
             for idx, row in tmp.iterrows():
                 match = row["Match"]
-                match_id = str(row.get("MatchID") or "").strip()
                 team_a, team_b = split_match_name(match)
                 ko = row["KO"]
                 big = bool(row.get("BigGame", False))
@@ -821,8 +703,6 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
                     if big:
                         st.markdown(f"<span class='badge-gold'>{tr(LANG_CODE,'gold_badge')}</span>", unsafe_allow_html=True)
 
-                    # (optional) show match id for admin/debug? keep hidden for users (no change)
-
                     if ko:
                         open_at = (to_tz(ko, tz) - timedelta(hours=2))
                         now_local = datetime.now(tz)
@@ -838,13 +718,12 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
                             else:
                                 already = predictions_df[
                                     (predictions_df["User"] == current_name) &
-                                    (predictions_df["Match"].astype(str) == str(match)) &
-                                    (predictions_df["MatchID"].fillna("").astype(str) == match_id)
+                                    (predictions_df["Match"] == match)
                                 ]
                                 if not already.empty:
                                     st.info(tr(LANG_CODE, "already_submitted"))
                                 else:
-                                    short_hash = abs(hash((match, match_id))) % 1_000_000_000
+                                    short_hash = abs(hash(match)) % 1_000_000_000
                                     score_key = f"pred_score_{idx}_{short_hash}"
                                     sel_key   = f"pred_winner_{idx}_{short_hash}"
                                     btn_key   = f"btn_{idx}_{short_hash}"
@@ -869,7 +748,6 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
                                                 new_pred = pd.DataFrame([{
                                                     "User": current_name,
                                                     "Match": match,
-                                                    "MatchID": match_id,
                                                     "Prediction": f"{h1}-{h2}",
                                                     "Winner": winner,
                                                     "SubmittedAt": datetime.now(ZoneInfo("UTC")).isoformat()
@@ -883,8 +761,7 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
 
     # ------------- Leaderboard -------------
     with tab2:
-        preds = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt","MatchID"])
-        if "MatchID" not in preds.columns: preds["MatchID"] = None
+        preds = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
         lb = recompute_leaderboard(preds)
         st.subheader(tr(LANG_CODE,"leaderboard"))
         if lb.empty:
@@ -912,12 +789,8 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
             }
             show = lb[[tr(LANG_CODE,"lb_rank"), "User","Predictions","Exact","Outcome","Points"]].rename(columns=col_map)
             st.dataframe(show, use_container_width=True)
-# =========================
-# app.py  (PART 5 / 6)
-# =========================
-
 # ─────────────────────────────
-# Admin Page
+# Admin Page (split: Save Details / Save Score) + logo previews in Add Match
 # ─────────────────────────────
 def page_admin(LANG_CODE: str, tz: ZoneInfo):
     apply_theme()
@@ -925,8 +798,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
     show_welcome_top_right(st.session_state.get("current_name") or "Admin", LANG_CODE)
 
     # Quick LB view
-    preds_all = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt","MatchID"])
-    if "MatchID" not in preds_all.columns: preds_all["MatchID"] = None
+    preds_all = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
     lb = recompute_leaderboard(preds_all)
     st.markdown("### " + tr(LANG_CODE,"leaderboard"))
     if lb.empty:
@@ -943,60 +815,6 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
         }
         view = lb[[tr(LANG_CODE,"lb_rank"),"User","Predictions","Exact","Outcome","Points"]].rename(columns=col_map)
         st.dataframe(view, use_container_width=True)
-
-    st.markdown("---")
-
-    # ─────────────────────────────
-    # Admin: Predictions Manager (NEW)
-    # ─────────────────────────────
-    st.markdown("### 🧾 Predictions Manager" if LANG_CODE=="en" else "### 🧾 إدارة التوقعات")
-
-    preds_df = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt","MatchID"])
-    if "MatchID" not in preds_df.columns: preds_df["MatchID"] = None
-
-    if preds_df.empty:
-        st.info("No predictions yet." if LANG_CODE=="en" else "لا توجد توقعات بعد.")
-    else:
-        # Show table
-        tmp_preds = preds_df.copy()
-        tmp_preds["SubmittedAt"] = pd.to_datetime(tmp_preds["SubmittedAt"], errors="coerce")
-        tmp_preds = tmp_preds.sort_values("SubmittedAt", ascending=False)
-
-        show_cols = ["User","Match","MatchID","Prediction","Winner","SubmittedAt"]
-        st.dataframe(tmp_preds[show_cols], use_container_width=True)
-
-        st.markdown("#### Delete ONE selected prediction" if LANG_CODE=="en" else "#### حذف توقع واحد محدد")
-
-        # Build a readable selector
-        def _pred_label(r):
-            mid = str(r.get("MatchID") or "").strip()
-            return f"{r.get('User','')} | {r.get('Match','')} | ID:{mid} | {r.get('Prediction','')} | {r.get('Winner','')}"
-
-        options = tmp_preds.apply(_pred_label, axis=1).tolist()
-        sel = st.selectbox(
-            "Select prediction" if LANG_CODE=="en" else "اختر التوقع",
-            options=options,
-            key="sel_one_pred"
-        )
-
-        if st.button("Delete selected prediction" if LANG_CODE=="en" else "حذف التوقع المحدد", key="btn_del_one_pred"):
-            # Find the row index back
-            idx_sel = options.index(sel)
-            row_sel = tmp_preds.iloc[idx_sel]
-            # Match by all main columns to be safe
-            mask = ~(
-                (preds_df["User"].astype(str) == str(row_sel["User"])) &
-                (preds_df["Match"].astype(str) == str(row_sel["Match"])) &
-                (preds_df["MatchID"].fillna("").astype(str) == str(row_sel.get("MatchID") or "")) &
-                (preds_df["Prediction"].astype(str) == str(row_sel["Prediction"])) &
-                (preds_df["Winner"].astype(str) == str(row_sel["Winner"])) &
-                (preds_df["SubmittedAt"].astype(str) == str(row_sel["SubmittedAt"]))
-            )
-            new_df = preds_df[mask].copy()
-            save_csv(new_df, PREDICTIONS_FILE)
-            recompute_leaderboard(new_df)
-            st.success("Prediction deleted." if LANG_CODE=="en" else "تم حذف التوقع.")
-            st.rerun()
 
     st.markdown("---")
     # Season settings
@@ -1047,10 +865,8 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                  now + timedelta(days=3), 9, 0, tr(LANG_CODE,"ampm_pm"), False, "Saudi Derby",
                  "https://upload.wikimedia.org/wikipedia/commons/8/8f/Trophy_icon.png", "Round 2"),
             ]
-            cols = ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","MatchID"]
+            cols = ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round"]
             m = load_csv(MATCHES_FILE, cols)
-            if "MatchID" not in m.columns: m["MatchID"] = None
-
             for A,B,Au,Bu,dt_,hr,mi,ap,big,occ,occlogo,rnd in samples:
                 is_pm = (ap in ["PM","مساء"])
                 hr24 = (0 if hr==12 else int(hr)) + (12 if is_pm else 0)
@@ -1059,7 +875,6 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                 B_logo = cache_logo_from_url(Bu) or Bu
                 occ_logo = cache_logo_from_url(occlogo) or occlogo
                 save_team_logo(A, A_logo); save_team_logo(B, B_logo)
-
                 row = pd.DataFrame([{
                     "Match": f"{A} vs {B}",
                     "Kickoff": ko.isoformat(),
@@ -1071,14 +886,13 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     "Occasion": occ,
                     "OccasionLogo": occ_logo,
                     "Round": rnd,
-                    "MatchID": generate_match_id(f"{A} vs {B}", ko.isoformat()),
                 }])
                 m = pd.concat([m, row], ignore_index=True)
             save_csv(m, MATCHES_FILE)
             st.success(tr(LANG_CODE,"test_done"))
 
     st.markdown("---")
-    # Add match
+    # Add match (with live logo previews)
     st.markdown(f"### {tr(LANG_CODE,'add_match')}")
     colA, colB = st.columns(2)
     with colA:
@@ -1151,14 +965,10 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
             if teamA and home_logo: save_team_logo(teamA, home_logo)
             if teamB and away_logo: save_team_logo(teamB, away_logo)
 
-            m = load_csv(MATCHES_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","MatchID"])
-            if "MatchID" not in m.columns: m["MatchID"] = None
-
-            match_name = f"{teamA} vs {teamB}"
-            ko_iso = ko.isoformat()
+            m = load_csv(MATCHES_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round"])
             row = pd.DataFrame([{
-                "Match": match_name,
-                "Kickoff": ko_iso,
+                "Match": f"{teamA} vs {teamB}",
+                "Kickoff": ko.isoformat(),
                 "Result": None,
                 "HomeLogo": home_logo,
                 "AwayLogo": away_logo,
@@ -1167,7 +977,6 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                 "Occasion": occ or "",
                 "OccasionLogo": occ_logo_final,
                 "Round": rnd or "",
-                "MatchID": generate_match_id(match_name, ko_iso),
             }])
             m = pd.concat([m, row], ignore_index=True)
             save_csv(m, MATCHES_FILE)
@@ -1176,22 +985,16 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
     st.markdown("---")
     # Edit matches (open)
     st.markdown(f"### {tr(LANG_CODE,'edit_matches')}")
-    mdf = load_csv(MATCHES_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","MatchID"])
-    if "MatchID" not in mdf.columns: mdf["MatchID"] = None
-
+    mdf = load_csv(MATCHES_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round"])
     if mdf.empty:
         st.info(tr(LANG_CODE,"no_matches"))
     else:
         mdf["KO"] = mdf["Kickoff"].apply(parse_iso_dt)
         mdf = mdf.sort_values("KO").reset_index(drop=True)
-
         for idx, row in mdf.iterrows():
             st.markdown("---")
             team_a, team_b = split_match_name(row["Match"])
-            match_id = str(row.get("MatchID") or "").strip()
             st.markdown(f"**{row['Match']}**  \n{tr(LANG_CODE,'kickoff')}: {format_dt_ampm(row['KO'], tz, LANG_CODE)}")
-            if match_id:
-                st.caption(f"Match ID: `{match_id}`")
 
             c1, c2, c3 = st.columns(3)
             with c1:
@@ -1257,11 +1060,8 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     if new_team_b and final_logo_b: save_team_logo(new_team_b, final_logo_b)
 
                     new_match_name = f"{new_team_a} vs {new_team_b}"
-                    new_ko_iso = new_ko.isoformat()
-
-                    # Keep existing MatchID (do not change) to preserve predictions linking
-                    mdf.loc[mdf["MatchID"].fillna("").astype(str) == match_id, ["Match","Kickoff","HomeLogo","AwayLogo","BigGame","Occasion","OccasionLogo","Round"]] = [
-                        new_match_name, new_ko_iso, final_logo_a, final_logo_b, bool(big_val),
+                    mdf.loc[mdf["Match"] == row["Match"], ["Match","Kickoff","HomeLogo","AwayLogo","BigGame","Occasion","OccasionLogo","Round"]] = [
+                        new_match_name, new_ko.isoformat(), final_logo_a, final_logo_b, bool(big_val),
                         new_occ or "", final_occ_logo, new_round or ""
                     ]
                     save_csv(mdf, MATCHES_FILE)
@@ -1274,24 +1074,18 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     if val and not re.fullmatch(r"\d{1,2}-\d{1,2}", val):
                         st.error(tr(LANG_CODE,"fmt_error"))
                     else:
-                        mdf.loc[mdf["MatchID"].fillna("").astype(str) == match_id, ["Result","RealWinner"]] = [(val if val else None), (realw or "")]
+                        mdf.loc[mdf["Match"] == row["Match"], ["Result","RealWinner"]] = [(val if val else None), (realw or "")]
                         save_csv(mdf, MATCHES_FILE)
-
-                        preds_now = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt","MatchID"])
-                        if "MatchID" not in preds_now.columns: preds_now["MatchID"] = None
+                        preds_now = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
                         recompute_leaderboard(preds_now)
-
                         if val:
-                            hist = load_csv(MATCH_HISTORY_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","CompletedAt","MatchID"])
+                            hist = load_csv(MATCH_HISTORY_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","CompletedAt"])
                             hist = ensure_history_schema(hist)
-                            if "MatchID" not in hist.columns: hist["MatchID"] = None
-
-                            current_row = mdf[mdf["MatchID"].fillna("").astype(str) == match_id].copy()
+                            current_row = mdf[mdf["Match"] == row["Match"]].copy()
                             current_row["CompletedAt"] = datetime.now(ZoneInfo("UTC")).isoformat()
                             hist = pd.concat([hist, current_row], ignore_index=True)
                             save_csv(hist, MATCH_HISTORY_FILE)
-
-                            mdf = mdf[mdf["MatchID"].fillna("").astype(str) != match_id]
+                            mdf = mdf[mdf["Match"] != row["Match"]]
                             save_csv(mdf, MATCHES_FILE)
 
                         st.success(tr(LANG_CODE,"updated"))
@@ -1299,27 +1093,20 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
 
             with col_actions3:
                 if st.button(tr(LANG_CODE,"delete"), key=f"btn_del_{idx}"):
-                    # FEATURE #1: deleting match also deletes all predictions for that MatchID
-                    mdf = mdf[mdf["MatchID"].fillna("").astype(str) != match_id]
+                    mdf = mdf[mdf["Match"] != row["Match"]]
                     save_csv(mdf, MATCHES_FILE)
-
-                    preds = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt","MatchID"])
-                    if "MatchID" not in preds.columns: preds["MatchID"] = None
-                    preds = preds[preds["MatchID"].fillna("").astype(str) != match_id]
-                    save_csv(preds, PREDICTIONS_FILE)
-
-                    recompute_leaderboard(preds)
-
+                    if os.path.exists(PREDICTIONS_FILE):
+                        p = pd.read_csv(PREDICTIONS_FILE)
+                        p = p[p["Match"] != row["Match"]]
+                        save_csv(p, PREDICTIONS_FILE)
                     st.success(tr(LANG_CODE,"deleted"))
                     st.rerun()
 
     st.markdown("---")
     # Match History (Admin only)
     st.markdown(f"### {tr(LANG_CODE,'match_history')}")
-    hist = load_csv(MATCH_HISTORY_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","CompletedAt","MatchID"])
+    hist = load_csv(MATCH_HISTORY_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","CompletedAt"])
     hist = ensure_history_schema(hist)
-    if "MatchID" not in hist.columns: hist["MatchID"] = None
-
     if hist.empty:
         st.info(tr(LANG_CODE,"no_matches"))
     else:
@@ -1330,40 +1117,15 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
         view = view.sort_values("CompletedAt", ascending=False)
         view["Kickoff"] = view["Kickoff"].apply(lambda x: format_dt_ampm(x, tz_local, LANG_CODE))
         view["CompletedAt"] = view["CompletedAt"].dt.strftime("%Y-%m-%d %H:%M")
-        st.dataframe(view[["MatchID","Match","Kickoff","Result","RealWinner","Occasion","Round","CompletedAt"]], use_container_width=True)
+        st.dataframe(view[["Match","Kickoff","Result","RealWinner","Occasion","Round","CompletedAt"]], use_container_width=True)
 
     st.markdown("---")
     # Registered Users + Terminate + Delete
     st.markdown(f"### {tr(LANG_CODE,'registered_users')}")
     users_df = load_users()
-    
-    st.markdown("---")
-    st.markdown("#### OTP Reset (Admin)" if LANG_CODE=="en" else "#### إعادة تعيين الرقم السري (OTP للمشرف)")
-
-otp_col1, otp_col2 = st.columns([2,1])
-with otp_col1:
-            st.caption("Generate a one-time OTP code for the selected user (valid for 10 minutes)." if LANG_CODE=="en"
-                       else "إنشاء رمز OTP لمرة واحدة للمستخدم المحدد (صالح لمدة 10 دقائق).")
-with otp_col2:
-            if st.button("Generate OTP (10 min)" if LANG_CODE=="en" else "إنشاء OTP (10 دقائق)", key="btn_gen_otp"):
-                users_df = load_users()
-                hit = users_df[users_df["Name"].astype(str).str.strip().str.casefold() == str(target_name).strip().casefold()]
-                if hit.empty:
-                    st.error("User not found." if LANG_CODE=="en" else "المستخدم غير موجود.")
-                else:
-                    otp = _generate_otp_code()
-                    exp = (datetime.now(ZoneInfo("UTC")) + timedelta(minutes=10)).isoformat()
-
-                    users_df.loc[hit.index, "ResetOTPHash"] = _hash_otp(otp)
-                    users_df.loc[hit.index, "ResetOTPExpiresAt"] = exp
-                    save_users(users_df)
-
-                    st.success(("OTP for user: " + otp) if LANG_CODE=="en" else ("رمز OTP للمستخدم: " + otp))
-                    st.warning("Copy it now. It will not be shown again." if LANG_CODE=="en" else "انسخه الآن. لن يظهر مرة أخرى.")
-
-if users_df.empty:
+    if users_df.empty:
         st.info("No users yet." if LANG_CODE=="en" else "لا يوجد مستخدمون بعد.")
-else:
+    else:
         show = users_df.copy().sort_values("CreatedAt")
         show = show.rename(columns={
             "Name": tr(LANG_CODE,"lb_user"),
@@ -1408,92 +1170,10 @@ else:
                     save_users(users_df)
                     st.success("User deleted." if LANG_CODE=="en" else "تم حذف المستخدم.")
                     st.rerun()
-# =========================
-# app.py  (PART 6 / 6)
-# =========================
-
-# ─────────────────────────────
-# MatchID helpers (safe backfill)
-# ─────────────────────────────
-def generate_match_id(match_name: str, kickoff_iso: str) -> str:
-    """Stable ID based on (match name + kickoff)."""
-    base = f"{str(match_name or '').strip()}|{str(kickoff_iso or '').strip()}"
-    return hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
-
-def _ensure_match_ids_in_matches():
-    """Ensure every match row has MatchID. Safe for old data."""
-    cols = ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","MatchID"]
-    m = load_csv(MATCHES_FILE, cols)
-    if m.empty:
-        return
-    if "MatchID" not in m.columns:
-        m["MatchID"] = None
-    changed = False
-    for i in m.index:
-        if not str(m.loc[i, "MatchID"] or "").strip():
-            m.loc[i, "MatchID"] = generate_match_id(m.loc[i, "Match"], m.loc[i, "Kickoff"])
-            changed = True
-    if changed:
-        save_csv(m, MATCHES_FILE)
-
-def _ensure_match_ids_in_history():
-    cols = ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","CompletedAt","MatchID"]
-    h = load_csv(MATCH_HISTORY_FILE, cols)
-    if h.empty:
-        return
-    if "MatchID" not in h.columns:
-        h["MatchID"] = None
-    changed = False
-    for i in h.index:
-        if not str(h.loc[i, "MatchID"] or "").strip():
-            h.loc[i, "MatchID"] = generate_match_id(h.loc[i, "Match"], h.loc[i, "Kickoff"])
-            changed = True
-    if changed:
-        save_csv(h, MATCH_HISTORY_FILE)
-
-def _ensure_match_ids_in_predictions():
-    """Try to fill MatchID in predictions by matching (Match name + Kickoff) from matches/history."""
-    cols = ["User","Match","Prediction","Winner","SubmittedAt","MatchID"]
-    p = load_csv(PREDICTIONS_FILE, cols)
-    if p.empty:
-        return
-    if "MatchID" not in p.columns:
-        p["MatchID"] = None
-
-    # build lookup by Match name from both tables (best effort)
-    m = load_csv(MATCHES_FILE, ["Match","Kickoff","MatchID"])
-    h = load_csv(MATCH_HISTORY_FILE, ["Match","Kickoff","MatchID"])
-    lookup = {}
-    for df in [m, h]:
-        if df.empty:
-            continue
-        if "MatchID" not in df.columns:
-            df["MatchID"] = None
-        for _, r in df.iterrows():
-            mid = str(r.get("MatchID") or "").strip()
-            if mid:
-                lookup[str(r.get("Match") or "").strip()] = mid
-
-    changed = False
-    for i in p.index:
-        if not str(p.loc[i, "MatchID"] or "").strip():
-            mid = lookup.get(str(p.loc[i, "Match"] or "").strip())
-            if mid:
-                p.loc[i, "MatchID"] = mid
-                changed = True
-
-    if changed:
-        save_csv(p, PREDICTIONS_FILE)
-
 # ─────────────────────────────
 # Router & bootstrap
 # ─────────────────────────────
 def run_app():
-    # Backfill IDs (safe + fast)
-    _ensure_match_ids_in_matches()
-    _ensure_match_ids_in_history()
-    _ensure_match_ids_in_predictions()
-
     st.sidebar.subheader(tr('en','sidebar_lang') + " / " + tr('ar','sidebar_lang'))
     lang_choice = st.sidebar.radio("", [tr('en','lang_en'), tr('ar','lang_ar')], index=0, horizontal=True)
     LANG_CODE = 'ar' if lang_choice == tr('ar','lang_ar') else 'en'
@@ -1540,6 +1220,7 @@ def run_app():
         st.session_state.pop("current_name", None)
         st.rerun()
 
+    # ⬇️ Make sure role is defined BEFORE using it
     role = st.session_state.get("role", None)
 
     if role == "user":
