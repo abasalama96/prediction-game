@@ -1337,8 +1337,8 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
     st.markdown(f"### {tr(LANG_CODE,'registered_users')}")
     users_df = load_users()
     
-            st.markdown("---")
-        st.markdown("#### OTP Reset (Admin)" if LANG_CODE=="en" else "#### إعادة تعيين الرقم السري (OTP للمشرف)")
+    st.markdown("---")
+    st.markdown("#### OTP Reset (Admin)" if LANG_CODE=="en" else "#### إعادة تعيين الرقم السري (OTP للمشرف)")
 
         otp_col1, otp_col2 = st.columns([2,1])
         with otp_col1:
