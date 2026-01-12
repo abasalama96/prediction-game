@@ -1340,11 +1340,11 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
     st.markdown("---")
     st.markdown("#### OTP Reset (Admin)" if LANG_CODE=="en" else "#### إعادة تعيين الرقم السري (OTP للمشرف)")
 
-        otp_col1, otp_col2 = st.columns([2,1])
-        with otp_col1:
+otp_col1, otp_col2 = st.columns([2,1])
+with otp_col1:
             st.caption("Generate a one-time OTP code for the selected user (valid for 10 minutes)." if LANG_CODE=="en"
                        else "إنشاء رمز OTP لمرة واحدة للمستخدم المحدد (صالح لمدة 10 دقائق).")
-        with otp_col2:
+with otp_col2:
             if st.button("Generate OTP (10 min)" if LANG_CODE=="en" else "إنشاء OTP (10 دقائق)", key="btn_gen_otp"):
                 users_df = load_users()
                 hit = users_df[users_df["Name"].astype(str).str.strip().str.casefold() == str(target_name).strip().casefold()]
@@ -1361,9 +1361,9 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     st.success(("OTP for user: " + otp) if LANG_CODE=="en" else ("رمز OTP للمستخدم: " + otp))
                     st.warning("Copy it now. It will not be shown again." if LANG_CODE=="en" else "انسخه الآن. لن يظهر مرة أخرى.")
 
-    if users_df.empty:
+if users_df.empty:
         st.info("No users yet." if LANG_CODE=="en" else "لا يوجد مستخدمون بعد.")
-    else:
+else:
         show = users_df.copy().sort_values("CreatedAt")
         show = show.rename(columns={
             "Name": tr(LANG_CODE,"lb_user"),
