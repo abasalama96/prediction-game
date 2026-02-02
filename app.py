@@ -638,9 +638,7 @@ def save_users(df):
     df[cols].to_csv(USERS_FILE, index=False)
 
 # ─────────────────────────────
-# OTP PIN reset (ADMIN only)
-# - Generates a one-time 6-digit OTP valid for 10 minutes
-# - Admin gives OTP to user; user uses OTP to set a new PIN
+# OTP PIN Reset (Admin generates OTP, user resets PIN)
 # ─────────────────────────────
 OTP_FILE = os.path.join(DATA_DIR, "otp_reset.json")
 
@@ -660,48 +658,52 @@ def _save_otp_store(store: dict) -> None:
     except Exception:
         pass
 
-def otp_issue_for_user(username: str, minutes_valid: int = 10) -> str:
-    """Create OTP for username and store expiry in UTC. Returns OTP (6 digits)."""
-    store = _load_otp_store()
-    otp = f"{secrets.randbelow(1_000_000):06d}"
-    exp = (datetime.now(ZoneInfo("UTC")) + timedelta(minutes=minutes_valid)).isoformat()
-    store[str(username).strip()] = {"otp": otp, "expires": exp}
-    _save_otp_store(store)
-    return otp
+def otp_generate(username: str, minutes_valid: int = 10) -> str:
+    username = (username or "").strip()
+    code = f"{secrets.randbelow(10**6):06d}"
+    expires_at = (datetime.now(ZoneInfo("UTC")) + timedelta(minutes=minutes_valid)).isoformat()
 
-def otp_verify(username: str, otp: str) -> bool:
-    """Verify OTP for username; if valid, consume it and return True."""
     store = _load_otp_store()
-    key = str(username).strip()
-    item = store.get(key)
-    if not item:
-        return False
-    try:
-        exp = datetime.fromisoformat(str(item.get("expires")))
-    except Exception:
-        exp = None
-    now = datetime.now(ZoneInfo("UTC"))
-    if not exp or now > exp:
-        # expired -> delete
-        store.pop(key, None)
-        _save_otp_store(store)
-        return False
-    if str(item.get("otp")) != str(otp).strip():
-        return False
-    # consume OTP
-    store.pop(key, None)
+    store[username] = {"code": code, "expires_at": expires_at}
     _save_otp_store(store)
+    return code
+
+def otp_clear(username: str) -> None:
+    store = _load_otp_store()
+    store.pop(username.strip(), None)
+    _save_otp_store(store)
+
+def otp_verify(username: str, code: str) -> bool:
+    username = username.strip()
+    code = normalize_digits(code or "").strip()
+
+    store = _load_otp_store()
+    entry = store.get(username)
+    if not entry:
+        return False
+
+    if entry["code"] != code:
+        return False
+
+    exp = parse_iso_dt(entry["expires_at"])
+    if not exp or datetime.now(ZoneInfo("UTC")) > exp:
+        return False
+
     return True
 
-def set_user_pin(username: str, new_pin_4digits: str) -> bool:
-    """Update user's PinHash (hash+salt) in users.csv."""
+def set_user_pin(username: str, new_pin: str) -> bool:
+    if not re.fullmatch(r"\d{4}", normalize_digits(new_pin or "")):
+        return False
+
     users_df = load_users()
-    mask = users_df["Name"].astype(str).str.strip().str.casefold() == str(username).strip().casefold()
+    mask = users_df["Name"].str.casefold() == username.casefold()
     if not mask.any():
         return False
-    users_df.loc[mask, "PinHash"] = _hash_pin(normalize_digits(new_pin_4digits))
+
+    users_df.loc[mask, "PinHash"] = _hash_pin(normalize_digits(new_pin))
     save_users(users_df)
     return True
+
 
 # ─────────────────────────────
 # Scoring helpers
