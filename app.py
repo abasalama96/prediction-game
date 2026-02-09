@@ -716,11 +716,40 @@ def _load_all_matches_for_scoring() -> pd.DataFrame:
         return pd.DataFrame(columns=["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round"])
     return pd.concat([open_m, hist_m], ignore_index=True)
 
+def _apply_overrides_to_leaderboard(lb: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply manual overrides (Predictions & Points) on top of computed leaderboard.
+    This is THE FIX so users see overrides too.
+    """
+    if lb is None or lb.empty:
+        return lb
+
+    ovr = load_overrides()
+    if ovr is None or ovr.empty:
+        return lb
+
+    merged = lb.merge(ovr, on="User", how="left", suffixes=("", "_ovr"))
+
+    def _coalesce(a, b):
+        return b if pd.notna(b) else a
+
+    merged["Predictions"] = merged.apply(lambda r: _coalesce(r.get("Predictions"), r.get("Predictions_ovr")), axis=1)
+    merged["Points"]      = merged.apply(lambda r: _coalesce(r.get("Points"),      r.get("Points_ovr")), axis=1)
+
+    # Ensure numeric
+    merged["Predictions"] = pd.to_numeric(merged["Predictions"], errors="coerce").fillna(0).astype(int)
+    merged["Points"]      = pd.to_numeric(merged["Points"], errors="coerce").fillna(0).astype(int)
+
+    merged = merged[["User","Points","Predictions","Exact","Outcome"]]
+    merged = merged.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False])
+    return merged
+
 def recompute_leaderboard(predictions_df: pd.DataFrame) -> pd.DataFrame:
     cols = ["User","Points","Predictions","Exact","Outcome"]
     lb = pd.DataFrame(columns=cols)
 
     if predictions_df.empty:
+        # even if empty, write empty file
         save_csv(lb, LEADERBOARD_FILE)
         return lb
 
@@ -758,6 +787,10 @@ def recompute_leaderboard(predictions_df: pd.DataFrame) -> pd.DataFrame:
                  Exact=("Exact","sum"), Outcome=("Outcome","sum")))
 
     lb = lb.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False])
+
+    # ✅ FIX: apply overrides ALWAYS before saving + returning
+    lb = _apply_overrides_to_leaderboard(lb)
+
     save_csv(lb, LEADERBOARD_FILE)
     return lb
 # =========================
@@ -1001,7 +1034,10 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
                                                 }])
                                                 predictions_df = pd.concat([predictions_df, new_pred], ignore_index=True)
                                                 save_csv(predictions_df, PREDICTIONS_FILE)
+
+                                                # recompute (now includes overrides)
                                                 recompute_leaderboard(predictions_df)
+
                                                 st.success(tr(LANG_CODE, "saved_ok"))
                         else:
                             st.caption(f"🔒 {tr(LANG_CODE,'closed')}")
@@ -1009,7 +1045,7 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
     # ------------- Leaderboard -------------
     with tab2:
         preds = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
-        lb = recompute_leaderboard(preds)
+        lb = recompute_leaderboard(preds)  # ✅ now returns leaderboard WITH overrides applied
 
         st.subheader(tr(LANG_CODE,"leaderboard"))
         if lb.empty:
@@ -1052,7 +1088,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
     st.title(f"🔑 {tr(LANG_CODE,'admin_panel')}")
     show_welcome_top_right(st.session_state.get("current_name") or "Admin", LANG_CODE)
 
-    # Recompute LB every admin view (safe)
+    # Recompute LB every admin view (safe) (now includes overrides)
     preds_all = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
     lb = recompute_leaderboard(preds_all)
 
@@ -1273,7 +1309,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                             save_csv(mdf, MATCHES_FILE)
 
                             preds_now = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
-                            recompute_leaderboard(preds_now)
+                            recompute_leaderboard(preds_now)  # ✅ includes overrides
 
                             if val:
                                 hist = load_csv(MATCH_HISTORY_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","CompletedAt"])
@@ -1298,7 +1334,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                         p = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
                         p = p[p["Match"] != row["Match"]]
                         save_csv(p, PREDICTIONS_FILE)
-                        recompute_leaderboard(p)
+                        recompute_leaderboard(p)  # ✅ includes overrides
 
                         st.success(tr(LANG_CODE,"deleted"))
                         st.rerun()
@@ -1381,7 +1417,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                 p = p[p["Match"] != delm]
                 after = len(p)
                 save_csv(p, PREDICTIONS_FILE)
-                recompute_leaderboard(p)
+                recompute_leaderboard(p)  # ✅ includes overrides
                 st.success(f"Deleted {before-after} predictions ✅")
                 st.rerun()
 
@@ -1428,7 +1464,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                         removed = int(mask.sum())
                         p = p[~mask]
                         save_csv(p, PREDICTIONS_FILE)
-                        recompute_leaderboard(p)
+                        recompute_leaderboard(p)  # ✅ includes overrides
                         st.success(f"Deleted {removed} row(s) ✅")
                         st.rerun()
 # =========================
@@ -1570,7 +1606,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                 if up and st.button("Restore Now", key="btn_restore_now_settings_tab"):
                     restore_from_zip(up)
 
-                    # IMPORTANT FIX: after restore, recompute leaderboard from restored predictions
+                    # IMPORTANT FIX: after restore, recompute leaderboard from restored predictions (includes overrides)
                     restored_preds = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
                     recompute_leaderboard(restored_preds)
 
@@ -1625,7 +1661,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                         u = u[mask_keep]
                         save_users(u)
 
-                        # remove predictions for that user + recompute
+                        # remove predictions for that user + recompute (includes overrides)
                         p = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
                         p = p[p["User"].astype(str).str.strip().str.casefold() != str(target_name).strip().casefold()]
                         save_csv(p, PREDICTIONS_FILE)
@@ -1674,32 +1710,13 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
         st.subheader("✏️ Manual Overrides (Predictions & Points)")
 
         preds_now_for_edit = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
-        lb_current = recompute_leaderboard(preds_now_for_edit).copy()
+        lb_current = recompute_leaderboard(preds_now_for_edit).copy()  # ✅ now includes overrides already
         overrides = load_overrides()
 
         if lb_current.empty:
             st.info(tr(LANG_CODE, "no_scores_yet"))
         else:
-            merged = lb_current.merge(overrides, on="User", how="left", suffixes=("", "_ovr"))
-
-            def _coalesce(a, b):
-                return b if pd.notna(b) else a
-
-            merged["Predictions"] = merged.apply(lambda r: _coalesce(r.get("Predictions"), r.get("Predictions_ovr")), axis=1)
-            merged["Points"]      = merged.apply(lambda r: _coalesce(r.get("Points"),      r.get("Points_ovr")), axis=1)
-
-            merged = merged.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False]).reset_index(drop=True)
-            merged.insert(0, tr(LANG_CODE, "lb_rank"), range(1, len(merged) + 1))
-
-            col_map = {
-                "User": tr(LANG_CODE,"lb_user"),
-                "Predictions": tr(LANG_CODE,"lb_preds"),
-                "Exact": tr(LANG_CODE,"lb_exact"),
-                "Outcome": tr(LANG_CODE,"lb_outcome"),
-                "Points": tr(LANG_CODE,"lb_points"),
-            }
-            preview = merged[[tr(LANG_CODE,"lb_rank"), "User","Predictions","Exact","Outcome","Points"]].rename(columns=col_map)
-            st.dataframe(preview, use_container_width=True)
+            st.dataframe(lb_current, use_container_width=True)
 
             st.markdown("#### Edit an entry")
             edit_col1, edit_col2, edit_col3, edit_col4 = st.columns([2,1,1,1])
@@ -1732,7 +1749,12 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                             "Points": int(new_points),
                         }])], ignore_index=True)
                     save_overrides(o)
-                    st.success("Override saved.")
+
+                    # ✅ IMPORTANT: force recompute so leaderboard.csv is rewritten with overrides
+                    preds_refresh = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+                    recompute_leaderboard(preds_refresh)
+
+                    st.success("Override saved and applied ✅")
                     st.rerun()
 
             util_c1, util_c2, util_c3 = st.columns([1,1,1])
@@ -1741,22 +1763,26 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     o = load_overrides()
                     o = o[o["User"] != user_pick]
                     save_overrides(o)
-                    st.success("Override cleared.")
+
+                    preds_refresh = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+                    recompute_leaderboard(preds_refresh)
+
+                    st.success("Override cleared ✅")
                     st.rerun()
             with util_c2:
                 if st.button("Clear ALL Overrides", key="btn_clear_override_all"):
                     save_overrides(pd.DataFrame(columns=["User","Predictions","Points"]))
-                    st.success("All overrides cleared.")
+
+                    preds_refresh = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+                    recompute_leaderboard(preds_refresh)
+
+                    st.success("All overrides cleared ✅")
                     st.rerun()
             with util_c3:
                 if st.button("Apply Overrides → Write Leaderboard.csv", key="btn_apply_override_write"):
-                    applied = lb_current.merge(load_overrides(), on="User", how="left", suffixes=("", "_ovr"))
-                    applied["Predictions"] = applied.apply(lambda r: _coalesce(r.get("Predictions"), r.get("Predictions_ovr")), axis=1)
-                    applied["Points"]      = applied.apply(lambda r: _coalesce(r.get("Points"),      r.get("Points_ovr")), axis=1)
-                    applied = applied[["User","Points","Predictions","Exact","Outcome"]]
-                    applied = applied.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False])
-                    save_csv(applied, LEADERBOARD_FILE)
-                    st.success("Applied overrides to leaderboard.csv")
+                    preds_refresh = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+                    recompute_leaderboard(preds_refresh)
+                    st.success("Applied overrides to leaderboard.csv ✅")
 
     return
 
