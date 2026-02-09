@@ -2398,4 +2398,3 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     st.success("Re-applied ✅ (users will see it)")
 
     return
-```0
