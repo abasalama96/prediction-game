@@ -1393,5 +1393,4 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                 save_overrides(o)
                 st.success("Override saved (users will see it)")
                 st.rerun()
-
-    return
+ return
