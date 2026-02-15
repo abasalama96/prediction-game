@@ -1,7 +1,11 @@
-import os, re, json, hashlib, secrets, zipfile
+# =========================
+# app.py (PART 1/6)
+# =========================
+import os, re, json, hashlib, secrets
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from urllib.parse import urlparse
+import zipfile
 from io import BytesIO
 
 import pandas as pd
@@ -43,44 +47,24 @@ def create_backup_zip() -> BytesIO:
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
         for path in BACKUP_FILES:
             try:
-                if os.path.exists(path) and os.path.getsize(path) > 0:
+                if os.path.exists(path):
                     z.write(path, arcname=os.path.basename(path))
             except Exception:
                 pass
-
-        try:
-            if os.path.isdir(LOGO_DIR):
-                for root, _, files in os.walk(LOGO_DIR):
-                    for fn in files:
-                        p = os.path.join(root, fn)
-                        if os.path.isfile(p) and os.path.getsize(p) > 0:
-                            z.write(p, arcname=os.path.join("logos", fn))
-        except Exception:
-            pass
-
     buf.seek(0)
     return buf
 
 def restore_from_zip(filelike) -> None:
+    filelike.seek(0)
     with zipfile.ZipFile(filelike, "r") as z:
         allowed = {os.path.basename(p) for p in BACKUP_FILES}
         for member in z.namelist():
             base = os.path.basename(member)
             if base in allowed:
                 try:
-                    data = z.read(member)
-                    out_path = os.path.join(DATA_DIR, base)
-                    with open(out_path, "wb") as f:
-                        f.write(data)
-                except Exception:
-                    pass
-            elif member.startswith("logos/") and not member.endswith("/"):
-                try:
-                    data = z.read(member)
-                    os.makedirs(LOGO_DIR, exist_ok=True)
-                    out_path = os.path.join(LOGO_DIR, os.path.basename(member))
-                    with open(out_path, "wb") as f:
-                        f.write(data)
+                    target = os.path.join(DATA_DIR, base)
+                    with z.open(member) as src, open(target, "wb") as dst:
+                        dst.write(src.read())
                 except Exception:
                     pass
 
@@ -95,7 +79,7 @@ def _get_supabase_client():
     except Exception:
         return None
 
-def upload_backup_to_supabase(buf: BytesIO, bucket: str = "backups"):
+def upload_backup_to_supabase(buf: BytesIO, bucket: str = "backups") -> str | None:
     sb = _get_supabase_client()
     if not sb:
         return None
@@ -158,10 +142,8 @@ LANG = {
         "lb_outcome": "Outcome",
         "lb_points": "Points",
         "admin_panel": "Admin Panel",
-        "season_settings": "Season",
         "season_name_label": "Season Name (e.g., Real Madrid 2025)",
         "season_saved": "Season name saved.",
-        "reset_season": "Reset Season",
         "reset_confirm": "Season reset complete (team logos are kept).",
         "test_data": "Insert Test Data",
         "test_done": "Test data inserted.",
@@ -193,7 +175,6 @@ LANG = {
         "updated": "Updated",
         "deleted": "Deleted",
         "match_history": "Match History (Admin only)",
-        "registered_users": "Registered Users",
         "terminate": "Terminate",
         "terminated": "User terminated.",
     },
@@ -243,10 +224,8 @@ LANG = {
         "lb_outcome": "نصف التوقع",
         "lb_points": "النقاط",
         "admin_panel": "لوحة التحكم",
-        "season_settings": "الموسم",
         "season_name_label": "اسم الموسم (مثال: ريال مدريد 2025)",
         "season_saved": "تم حفظ اسم الموسم.",
-        "reset_season": "إعادة ضبط الموسم",
         "reset_confirm": "تمت إعادة ضبط الموسم (مع الاحتفاظ بالشعارات المحفوظة).",
         "test_data": "إدراج بيانات تجريبية",
         "test_done": "تم إدراج البيانات التجريبية.",
@@ -278,7 +257,6 @@ LANG = {
         "updated": "تم التحديث",
         "deleted": "تم الحذف",
         "match_history": "سجل المباريات (للمشرف فقط)",
-        "registered_users": "المستخدمون المسجّلون",
         "terminate": "إيقاف",
         "terminated": "تم إيقاف المستخدم.",
     }
@@ -288,6 +266,9 @@ def tr(lang, key, **kwargs):
     d = LANG["ar" if lang == "ar" else "en"]
     txt = d.get(key, key)
     return txt.format(**kwargs) if kwargs else txt
+# =========================
+# app.py (PART 2/6)
+# =========================
 def normalize_digits(text: str) -> str:
     if not isinstance(text, str):
         return text
@@ -325,7 +306,7 @@ def _hash_pin(pin: str) -> str:
     h = hashlib.sha256((salt + pin).encode("utf-8")).hexdigest()
     return f"{salt}:{h}"
 
-def _verify_pin(stored, pin: str) -> bool:
+def _verify_pin(stored: str | None, pin: str) -> bool:
     try:
         if stored is None:
             return False
@@ -390,7 +371,7 @@ def _filename_from_url(url: str) -> str:
     stem = hashlib.md5(url.encode()).hexdigest()
     return f"{stem}{ext}"
 
-def cache_logo_from_url(url: str):
+def cache_logo_from_url(url: str) -> str | None:
     if not (isinstance(url, str) and url.lower().startswith(("http://","https://"))):
         return None
     try:
@@ -398,7 +379,7 @@ def cache_logo_from_url(url: str):
         path = os.path.join(LOGO_DIR, fname)
         if os.path.exists(path):
             return path
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, timeout=12)
         r.raise_for_status()
         with open(path, "wb") as f:
             f.write(r.content)
@@ -406,7 +387,7 @@ def cache_logo_from_url(url: str):
     except Exception:
         return None
 
-def save_uploaded_logo(file, name_hint: str):
+def save_uploaded_logo(file, name_hint: str) -> str | None:
     try:
         ext = os.path.splitext(file.name)[1] or ".png"
         safe = re.sub(r"[^A-Za-z0-9_-]+", "_", name_hint or "logo")
@@ -437,12 +418,21 @@ def save_team_logo(team: str, logo_path_or_url: str | None):
     if not team or not logo_path_or_url:
         return
     logos = _load_team_logos()
-    logos[str(team)] = logo_path_or_url
+    logos[team] = logo_path_or_url
     _save_team_logos(logos)
 
-def get_saved_logo(team: str):
+def get_saved_logo(team: str) -> str | None:
     logos = _load_team_logos()
     return logos.get(team or "", None)
+
+def ensure_history_schema(df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","CompletedAt"]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    for c in cols:
+        if c not in df.columns:
+            df[c] = None
+    return df[cols]
 
 def show_logo_safe(img_ref, width=56, caption=""):
     try:
@@ -459,12 +449,9 @@ def show_logo_safe(img_ref, width=56, caption=""):
 def apply_theme():
     st.markdown("""
     <style>
-      html, body, [data-testid="stAppViewContainer"] {
-        background: linear-gradient(180deg,#0a1f0f,#08210c);
-        color:#eafbea;
-      }
-      .card { background: rgba(255,255,255,0.06); border: 1px solid #134e29;
-              border-radius: 16px; padding: 12px 16px; box-shadow: 0 6px 18px rgba(0,0,0,0.25); margin-bottom:10px; }
+      html, body, [data-testid="stAppViewContainer"] { background: linear-gradient(180deg,#0a1f0f,#08210c); color:#eafbea; }
+      .card { background: rgba(255,255,255,0.06); border: 1px solid #134e29; border-radius: 16px; padding: 12px 16px;
+              box-shadow: 0 6px 18px rgba(0,0,0,0.25); margin-bottom:10px; }
       .badge-gold { background:#FFF4C2; color:#000; border:1px solid #111; padding:4px 10px; border-radius:999px; font-weight:700; }
       .welcome-wrap { width:100%; text-align:right; margin-top:-6px; margin-bottom:6px; color:#eafbea; opacity:0.9; }
     </style>
@@ -497,15 +484,9 @@ def _get_tz_from_query_params(default_tz="Asia/Riyadh"):
         return st.query_params.get("tz", default_tz) or default_tz
     except Exception:
         return default_tz
-def ensure_history_schema(df: pd.DataFrame) -> pd.DataFrame:
-    cols = ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","CompletedAt"]
-    if df.empty:
-        return pd.DataFrame(columns=cols)
-    for c in cols:
-        if c not in df.columns:
-            df[c] = None
-    return df[cols]
-
+# =========================
+# app.py (PART 3/6)
+# =========================
 def _otp_hash(code: str, salt: str) -> str:
     return hashlib.sha256((salt + code).encode("utf-8")).hexdigest()
 
@@ -529,12 +510,12 @@ def _otp_cleanup(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["ExpiresAt_dt"] = pd.to_datetime(df["ExpiresAt"], errors="coerce", utc=True)
     df = df[(df["ExpiresAt_dt"].isna()) | (df["ExpiresAt_dt"] > now)]
-    df = df.drop(columns=["ExpiresAt_dt"], errors="ignore")
-    return df
+    return df.drop(columns=["ExpiresAt_dt"], errors="ignore")
 
 def otp_revoke(user: str) -> None:
     df = _otp_cleanup(_load_otps())
-    df = df[df["User"].astype(str).str.strip().str.casefold() != str(user).strip().casefold()]
+    u = str(user).strip().casefold()
+    df = df[df["User"].astype(str).str.strip().str.casefold() != u]
     _save_otps(df)
 
 def otp_generate(user: str, minutes_valid: int = 10) -> str:
@@ -599,86 +580,82 @@ def split_match_name(match_name: str) -> tuple[str, str]:
         return parts[0].strip(), parts[1].strip()
     return (match_name or "").strip(), ""
 
-def parse_score(score_str: str):
-    s = normalize_digits(str(score_str or "")).strip()
+def _parse_score(score_str: str) -> tuple[int,int] | None:
+    if not isinstance(score_str, str):
+        return None
+    s = normalize_digits(score_str).strip()
     if not re.fullmatch(r"\d{1,2}-\d{1,2}", s):
         return None
-    a, b = s.split("-", 1)
     try:
-        a = int(a); b = int(b)
+        a, b = map(int, s.split("-"))
     except Exception:
         return None
     if not (0 <= a <= 20 and 0 <= b <= 20):
         return None
     return (a, b)
 
-def _norm_draw(x: str) -> str:
-    x = str(x or "").strip().casefold()
-    if x in {"draw", "تعادل"}:
-        return "draw"
-    return x
+def _norm_draw(x: str) -> bool:
+    s = str(x or "").strip().casefold()
+    return s in {"draw", "تعادل"} or s == tr("en","draw").casefold() or s == tr("ar","draw").casefold()
 
-def real_winner_from_match(match_name: str, result: str, real_winner_field: str | None):
-    rw = str(real_winner_field or "").strip()
+def get_real_winner(match_row: pd.Series) -> str:
+    rw = str(match_row.get("RealWinner") or "").strip()
     if rw:
-        if _norm_draw(rw) == "draw":
-            return "Draw"
-        return rw
-    pair = parse_score(result)
-    team_a, team_b = split_match_name(match_name)
-    if not pair:
+        return "Draw" if _norm_draw(rw) else rw
+    score = _parse_score(str(match_row.get("Result") or ""))
+    if not score:
         return "Draw"
-    ra, rb = pair
-    if ra == rb:
+    a, b = score
+    if a == b:
         return "Draw"
-    return team_a if ra > rb else team_b
+    team_a, team_b = split_match_name(match_row.get("Match") or "")
+    return team_a if a > b else team_b
 
-def points_for_prediction(match_name: str, result: str, pred: str, big_game: bool, chosen_winner: str) -> tuple[int,int,int]:
-    real_pair = parse_score(result)
-    pred_pair = parse_score(pred)
-    if not real_pair or not pred_pair:
-        return (0,0,0)
+def points_for_prediction(match_row: pd.Series, pred_score: str, chosen_winner: str) -> tuple[int,int,int]:
+    real_score = _parse_score(str(match_row.get("Result") or ""))
+    pred = _parse_score(str(pred_score or ""))
+    if not real_score or not pred:
+        return (0, 0, 0)
 
-    ra, rb = real_pair
-    pa, pb = pred_pair
+    big = bool(match_row.get("BigGame", False))
+    team_a, team_b = split_match_name(match_row.get("Match") or "")
 
-    if ra == pa and rb == pb:
-        return (6 if big_game else 3, 1, 0)
+    ra, rb = real_score
+    pa, pb = pred
 
-    team_a, team_b = split_match_name(match_name)
+    if (ra, rb) == (pa, pb):
+        return (6 if big else 3, 1, 0)
+
     real_w = "Draw" if ra == rb else (team_a if ra > rb else team_b)
 
     cw = str(chosen_winner or "").strip()
-    if _norm_draw(cw) == "draw":
-        cw = "Draw"
-    elif cw == team_a or cw == team_b:
-        pass
+    if _norm_draw(cw):
+        pred_w = "Draw"
     else:
-        cw = ""
+        pred_w = cw
 
-    pred_w = "Draw" if pa == pb else (team_a if pa > pb else team_b)
-    picked = cw if cw else pred_w
+    if real_w == "Draw" and pred_w == "Draw":
+        return (2 if big else 1, 0, 1)
 
-    if real_w == picked:
-        return (2 if big_game else 1, 0, 1)
+    if real_w != "Draw" and pred_w == real_w:
+        return (2 if big else 1, 0, 1)
 
-    return (0,0,0)
+    return (0, 0, 0)
 
 def _load_all_matches_for_scoring() -> pd.DataFrame:
     cols_open = ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round"]
-    cols_hist = ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","CompletedAt"]
+    cols_hist = cols_open + ["CompletedAt"]
     open_m = load_csv(MATCHES_FILE, cols_open)
     hist_m = load_csv(MATCH_HISTORY_FILE, cols_hist)
     if not hist_m.empty:
         hist_m = hist_m.drop(columns=["CompletedAt"], errors="ignore")
     if open_m.empty and hist_m.empty:
         return pd.DataFrame(columns=cols_open)
+    allm = pd.concat([open_m, hist_m], ignore_index=True)
     for c in cols_open:
-        if c not in open_m.columns:
-            open_m[c] = None
-        if c not in hist_m.columns:
-            hist_m[c] = None
-    return pd.concat([open_m[cols_open], hist_m[cols_open]], ignore_index=True)
+        if c not in allm.columns:
+            allm[c] = None
+    return allm[cols_open]
 
 def recompute_leaderboard(predictions_df: pd.DataFrame) -> pd.DataFrame:
     cols = ["User","Points","Predictions","Exact","Outcome"]
@@ -694,30 +671,25 @@ def recompute_leaderboard(predictions_df: pd.DataFrame) -> pd.DataFrame:
         return lb
 
     preds = predictions_df.copy()
-    preds["SubmittedAt"] = pd.to_datetime(preds["SubmittedAt"], errors="coerce", utc=True)
-    preds = preds.sort_values(["User","Match","SubmittedAt"])
+    preds["SubmittedAt_dt"] = pd.to_datetime(preds["SubmittedAt"], errors="coerce", utc=True)
+    preds = preds.sort_values(["User","Match","SubmittedAt_dt"])
     latest = preds.drop_duplicates(subset=["User","Match"], keep="last")
 
     rows = []
     for _, p in latest.iterrows():
-        match_name = str(p.get("Match") or "")
-        mrow = matches_full[matches_full["Match"].astype(str) == match_name]
+        mrow = matches_full[matches_full["Match"].astype(str) == str(p.get("Match"))]
         if mrow.empty:
             continue
         m = mrow.iloc[0]
-        result = m.get("Result")
-        if not isinstance(result, str) or "-" not in result:
+        score = _parse_score(str(m.get("Result") or ""))
+        if not score:
             continue
-        big = bool(m.get("BigGame", False))
-        chosen_winner = str(p.get("Winner") or "")
         pts, ex, out = points_for_prediction(
-            match_name=match_name,
-            result=str(result),
-            pred=str(p.get("Prediction") or ""),
-            big_game=big,
-            chosen_winner=chosen_winner
+            match_row=m,
+            pred_score=str(p.get("Prediction") or ""),
+            chosen_winner=str(p.get("Winner") or ""),
         )
-        rows.append({"User": p["User"], "Points": int(pts), "Exact": int(ex), "Outcome": int(out)})
+        rows.append({"User": str(p.get("User") or "").strip(), "Points": pts, "Exact": ex, "Outcome": out})
 
     if not rows:
         save_csv(lb, LEADERBOARD_FILE)
@@ -726,26 +698,30 @@ def recompute_leaderboard(predictions_df: pd.DataFrame) -> pd.DataFrame:
     per = pd.DataFrame(rows)
     lb = (per.groupby("User", as_index=False)
             .agg(Points=("Points","sum"),
-                 Predictions=("User","count"),
+                 Predictions=("Points","count"),
                  Exact=("Exact","sum"),
                  Outcome=("Outcome","sum")))
 
-    lb = lb.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False])
-    save_csv(lb, LEADERBOARD_FILE)
-    return lb
+    lb = lb.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False]).reset_index(drop=True)
 
-def apply_overrides_to_leaderboard(lb: pd.DataFrame) -> pd.DataFrame:
-    if lb is None or lb.empty:
-        return lb if lb is not None else pd.DataFrame(columns=["User","Points","Predictions","Exact","Outcome"])
-    o = load_overrides()
-    if o.empty:
-        return lb
-    merged = lb.merge(o, on="User", how="left", suffixes=("", "_ovr"))
-    merged["Predictions"] = merged.apply(lambda r: int(r["Predictions_ovr"]) if pd.notna(r.get("Predictions_ovr")) else int(r["Predictions"]), axis=1)
-    merged["Points"] = merged.apply(lambda r: int(r["Points_ovr"]) if pd.notna(r.get("Points_ovr")) else int(r["Points"]), axis=1)
-    merged = merged.drop(columns=["Predictions_ovr","Points_ovr"], errors="ignore")
-    merged = merged.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False]).reset_index(drop=True)
-    return merged
+    try:
+        ov = load_overrides()
+        if not ov.empty:
+            ov["Predictions"] = pd.to_numeric(ov["Predictions"], errors="coerce")
+            ov["Points"] = pd.to_numeric(ov["Points"], errors="coerce")
+            lb = lb.merge(ov, on="User", how="left", suffixes=("", "_ovr"))
+            lb["Predictions"] = lb["Predictions_ovr"].where(pd.notna(lb["Predictions_ovr"]), lb["Predictions"]).astype(int)
+            lb["Points"] = lb["Points_ovr"].where(pd.notna(lb["Points_ovr"]), lb["Points"]).astype(int)
+            lb = lb.drop(columns=["Predictions_ovr","Points_ovr"], errors="ignore")
+            lb = lb.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False]).reset_index(drop=True)
+    except Exception:
+        pass
+
+    save_csv(lb[cols], LEADERBOARD_FILE)
+    return lb
+# =========================
+# app.py (PART 4/6)
+# =========================
 def page_login(LANG_CODE: str):
     apply_theme()
     st.title(tr(LANG_CODE, "login_tab"))
@@ -768,13 +744,15 @@ def page_login(LANG_CODE: str):
             key="login_pin",
         )
         name_norm = (name_in or "").strip()
+        pin_norm = normalize_digits(pin_in or "").strip()
 
         if st.button(tr(LANG_CODE, "login"), key="btn_user_login"):
-            pin_n = normalize_digits(pin_in or "").strip()
-            if not name_norm or not re.fullmatch(r"\d{4}", pin_n):
+            if not name_norm or not re.fullmatch(r"\d{4}", pin_norm):
                 st.error(tr(LANG_CODE, "please_login_first"))
             else:
-                candidates = users_df[users_df["Name"].astype(str).str.strip().str.casefold() == name_norm.casefold()]
+                candidates = users_df[
+                    users_df["Name"].astype(str).str.strip().str.casefold() == name_norm.casefold()
+                ]
                 if candidates.empty:
                     st.error(tr(LANG_CODE, "please_login_first"))
                 else:
@@ -782,7 +760,7 @@ def page_login(LANG_CODE: str):
                     if int(row.get("IsBanned", 0)) == 1:
                         st.error("User is banned." if LANG_CODE == "en" else "المستخدم محظور.")
                     else:
-                        if _verify_pin(row.get("PinHash"), pin_n):
+                        if _verify_pin(row.get("PinHash"), pin_norm):
                             st.session_state["role"] = "user"
                             st.session_state["current_name"] = str(row["Name"]).strip()
                             st.success(tr(LANG_CODE, "login_ok"))
@@ -801,15 +779,15 @@ def page_login(LANG_CODE: str):
         )
 
         if st.button(tr(LANG_CODE, "register"), key="btn_register"):
-            rn = (reg_name or "").strip()
-            rp = normalize_digits(reg_pin or "").strip()
-            if not rn:
+            reg_name_n = (reg_name or "").strip()
+            reg_pin_n = normalize_digits(reg_pin or "").strip()
+            if not reg_name_n:
                 st.error(tr(LANG_CODE, "need_name"))
-            elif not re.fullmatch(r"\d{4}", rp):
+            elif not re.fullmatch(r"\d{4}", reg_pin_n):
                 st.error("PIN must be 4 digits." if LANG_CODE == "en" else "الرقم السري يجب أن يكون 4 أرقام.")
             else:
                 users_df = load_users()
-                exists = users_df["Name"].astype(str).str.strip().str.casefold().eq(rn.casefold()).any()
+                exists = users_df["Name"].astype(str).str.strip().str.casefold().eq(reg_name_n.casefold()).any()
                 if exists:
                     st.error(
                         "Name already exists. Please choose a different name."
@@ -820,10 +798,10 @@ def page_login(LANG_CODE: str):
                     new_row = pd.DataFrame(
                         [
                             {
-                                "Name": rn,
+                                "Name": reg_name_n,
                                 "CreatedAt": datetime.now(ZoneInfo("UTC")).isoformat(),
                                 "IsBanned": 0,
-                                "PinHash": _hash_pin(rp),
+                                "PinHash": _hash_pin(reg_pin_n),
                             }
                         ]
                     )
@@ -831,7 +809,7 @@ def page_login(LANG_CODE: str):
                     save_users(users_df)
                     st.success(tr(LANG_CODE, "login_ok"))
                     st.session_state["role"] = "user"
-                    st.session_state["current_name"] = rn
+                    st.session_state["current_name"] = reg_name_n
                     st.rerun()
 
         st.markdown("---")
@@ -879,7 +857,7 @@ def page_login(LANG_CODE: str):
 
     else:
         st.subheader(tr(LANG_CODE, "admin_login"))
-        pwd = st.text_input(tr(LANG_CODE, "admin_pass"), type="password", key="admin_pwd")
+        pwd = st.text_input(tr(LANG_CODE, "admin_pass"), type="password")
         if st.button(tr(LANG_CODE, "admin_login"), key="btn_admin_login"):
             if pwd == ADMIN_PASSWORD:
                 st.session_state["role"] = "admin"
@@ -888,6 +866,7 @@ def page_login(LANG_CODE: str):
                 st.rerun()
             else:
                 st.error(tr(LANG_CODE, "admin_bad"))
+
 
 def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
     apply_theme()
@@ -922,9 +901,9 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
             tmp = tmp.sort_values("KO").reset_index(drop=True)
 
             for idx, row in tmp.iterrows():
-                match = row["Match"]
+                match = row.get("Match")
                 team_a, team_b = split_match_name(match)
-                ko = row["KO"]
+                ko = row.get("KO")
                 big = bool(row.get("BigGame", False))
 
                 with st.container():
@@ -954,11 +933,12 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
 
                     if ko:
                         open_at = to_tz(ko, tz) - timedelta(hours=2)
-                        now_local = datetime.now(tz)
                         close_at = to_tz(ko, tz)
+                        now_local = datetime.now(tz)
 
                         if now_local < open_at:
-                            st.info(f"{tr(LANG_CODE,'opens_in')}: {human_delta(open_at - now_local, LANG_CODE)}")
+                            remain = open_at - now_local
+                            st.info(f"{tr(LANG_CODE,'opens_in')}: {human_delta(remain, LANG_CODE)}")
                         elif open_at <= now_local < close_at:
                             if not current_name:
                                 st.warning(tr(LANG_CODE, "please_login_first"))
@@ -970,7 +950,7 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
                                 if not already.empty:
                                     st.info(tr(LANG_CODE, "already_submitted"))
                                 else:
-                                    short_hash = abs(hash(match)) % 1_000_000_000
+                                    short_hash = abs(hash(str(match))) % 1_000_000_000
                                     score_key = f"pred_score_{idx}_{short_hash}"
                                     sel_key = f"pred_winner_{idx}_{short_hash}"
                                     btn_key = f"btn_{idx}_{short_hash}"
@@ -979,7 +959,10 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
                                     val = normalize_digits(raw or "").strip()
 
                                     options = [team_a, team_b, tr(LANG_CODE, "draw")]
-                                    is_draw_typed = bool(re.fullmatch(r"\d{1,2}-\d{1,2}", val) and val.split("-")[0] == val.split("-")[1])
+                                    is_draw_typed = False
+                                    parsed = _parse_score(val) if val else None
+                                    if parsed and parsed[0] == parsed[1]:
+                                        is_draw_typed = True
                                     default_ix = 2 if is_draw_typed else 0
                                     winner = st.selectbox(
                                         tr(LANG_CODE, "winner"),
@@ -990,56 +973,43 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
                                     )
 
                                     if st.button(tr(LANG_CODE, "submit_btn"), key=btn_key):
-                                        pair = parse_score(val)
-                                        if not pair:
+                                        parsed2 = _parse_score(val)
+                                        if not parsed2:
                                             st.error(tr(LANG_CODE, "fmt_error"))
                                         else:
-                                            h1, h2 = pair
+                                            h1, h2 = parsed2
                                             if h1 == h2:
                                                 winner = tr(LANG_CODE, "draw")
-                                            new_pred = pd.DataFrame(
-                                                [
-                                                    {
-                                                        "User": str(current_name),
-                                                        "Match": str(match),
-                                                        "Prediction": f"{h1}-{h2}",
-                                                        "Winner": str(winner),
-                                                        "SubmittedAt": datetime.now(ZoneInfo("UTC")).isoformat(),
-                                                    }
-                                                ]
-                                            )
+                                            new_pred = pd.DataFrame([{
+                                                "User": current_name,
+                                                "Match": match,
+                                                "Prediction": f"{h1}-{h2}",
+                                                "Winner": winner,
+                                                "SubmittedAt": datetime.now(ZoneInfo("UTC")).isoformat(),
+                                            }])
                                             predictions_df = pd.concat([predictions_df, new_pred], ignore_index=True)
                                             save_csv(predictions_df, PREDICTIONS_FILE)
                                             recompute_leaderboard(predictions_df)
                                             st.success(tr(LANG_CODE, "saved_ok"))
-                                            st.rerun()
                         else:
                             st.caption(f"🔒 {tr(LANG_CODE,'closed')}")
 
     with tab2:
         preds = load_csv(PREDICTIONS_FILE, ["User", "Match", "Prediction", "Winner", "SubmittedAt"])
-        lb_base = recompute_leaderboard(preds)
-        lb = apply_overrides_to_leaderboard(lb_base)
+        lb = recompute_leaderboard(preds)
 
         st.subheader(tr(LANG_CODE, "leaderboard"))
-        if lb is None or lb.empty:
+        if lb.empty:
             st.info(tr(LANG_CODE, "no_scores_yet"))
         else:
             lb = lb.reset_index(drop=True)
             lb.insert(0, tr(LANG_CODE, "lb_rank"), range(1, len(lb) + 1))
 
-            medal = []
+            medals = []
             for i in lb.index:
                 r_int = int(lb.loc[i, tr(LANG_CODE, "lb_rank")])
-                if r_int == 1:
-                    medal.append("🥇")
-                elif r_int == 2:
-                    medal.append("🥈")
-                elif r_int == 3:
-                    medal.append("🥉")
-                else:
-                    medal.append("")
-            lb[tr(LANG_CODE, "lb_rank")] = lb[tr(LANG_CODE, "lb_rank")].astype(str) + " " + pd.Series(medal)
+                medals.append("🥇" if r_int == 1 else "🥈" if r_int == 2 else "🥉" if r_int == 3 else "")
+            lb[tr(LANG_CODE, "lb_rank")] = lb[tr(LANG_CODE, "lb_rank")].astype(str) + " " + pd.Series(medals)
 
             col_map = {
                 "User": tr(LANG_CODE, "lb_user"),
@@ -1050,46 +1020,391 @@ def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
             }
             show = lb[[tr(LANG_CODE, "lb_rank"), "User", "Predictions", "Exact", "Outcome", "Points"]].rename(columns=col_map)
             st.dataframe(show, use_container_width=True)
-def parse_score(s: str) -> tuple[int, int] | None:
+# =========================
+# app.py (PART 5/6)
+# =========================
+def create_backup_zip() -> BytesIO:
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        for path in BACKUP_FILES:
+            base = os.path.basename(path)
+            try:
+                if os.path.exists(path):
+                    z.write(path, arcname=base)
+                else:
+                    z.writestr(base, "")
+            except Exception:
+                try:
+                    z.writestr(base, "")
+                except Exception:
+                    pass
+
+        try:
+            if os.path.isdir(LOGO_DIR):
+                for root, _, files in os.walk(LOGO_DIR):
+                    for fn in files:
+                        full = os.path.join(root, fn)
+                        if os.path.isfile(full):
+                            arc = os.path.join("logos", fn)
+                            try:
+                                z.write(full, arcname=arc)
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+    buf.seek(0)
+    return buf
+
+
+def restore_from_zip(filelike) -> None:
+    try:
+        filelike.seek(0)
+    except Exception:
+        pass
+
+    allowed = {os.path.basename(p) for p in BACKUP_FILES}
+    with zipfile.ZipFile(filelike, "r") as z:
+        for member in z.namelist():
+            base = os.path.basename(member)
+            if base in allowed:
+                try:
+                    out = os.path.join(DATA_DIR, base)
+                    try:
+                        if os.path.exists(out):
+                            os.remove(out)
+                    except Exception:
+                        pass
+                    with z.open(member) as src, open(out, "wb") as dst:
+                        dst.write(src.read())
+                except Exception:
+                    pass
+
+            if member.startswith("logos/") and not member.endswith("/"):
+                try:
+                    os.makedirs(LOGO_DIR, exist_ok=True)
+                    fn = os.path.basename(member)
+                    out = os.path.join(LOGO_DIR, fn)
+                    with z.open(member) as src, open(out, "wb") as dst:
+                        dst.write(src.read())
+                except Exception:
+                    pass
+
+
+def _parse_score(s: str) -> tuple[int, int] | None:
     s = normalize_digits(str(s or "")).strip()
     m = re.fullmatch(r"(\d{1,2})-(\d{1,2})", s)
     if not m:
         return None
-    a = int(m.group(1)); b = int(m.group(2))
+    a = int(m.group(1))
+    b = int(m.group(2))
     if not (0 <= a <= 20 and 0 <= b <= 20):
         return None
     return (a, b)
 
-def apply_overrides_to_leaderboard(lb: pd.DataFrame) -> pd.DataFrame:
-    if lb is None or lb.empty:
+
+def _norm_draw(txt: str) -> bool:
+    t = str(txt or "").strip().casefold()
+    return t in {"draw", "تعادل", "التعادل"}
+
+
+def _winner_from_score(match_name: str, score: str) -> str:
+    team_a, team_b = split_match_name(match_name)
+    parsed = _parse_score(score)
+    if not parsed:
+        return "Draw"
+    a, b = parsed
+    if a == b:
+        return "Draw"
+    return team_a if a > b else team_b
+
+
+def points_for_prediction(match_row: pd.Series, pred: str, big_game: bool, chosen_winner: str) -> tuple[int, int, int]:
+    match_name = str(match_row.get("Match") or "")
+    real_score = match_row.get("Result")
+    if not isinstance(real_score, str) or "-" not in real_score:
+        return (0, 0, 0)
+
+    real_parsed = _parse_score(real_score)
+    pred_parsed = _parse_score(pred)
+    if not real_parsed or not pred_parsed:
+        return (0, 0, 0)
+
+    if real_parsed == pred_parsed:
+        return (6 if big_game else 3, 1, 0)
+
+    real_w = _winner_from_score(match_name, real_score)
+    pred_w = _winner_from_score(match_name, f"{pred_parsed[0]}-{pred_parsed[1]}")
+
+    cw = str(chosen_winner or "").strip()
+    if _norm_draw(cw):
+        cw = "Draw"
+
+    if real_w == "Draw" and (pred_w == "Draw" or cw == "Draw"):
+        return (2 if big_game else 1, 0, 1)
+
+    if real_w != "Draw":
+        if pred_w == real_w:
+            return (2 if big_game else 1, 0, 1)
+        if cw and cw != "Draw" and cw == real_w:
+            return (2 if big_game else 1, 0, 1)
+
+    return (0, 0, 0)
+
+
+def recompute_leaderboard(predictions_df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["User", "Points", "Predictions", "Exact", "Outcome"]
+    empty = pd.DataFrame(columns=cols)
+
+    if predictions_df.empty:
+        save_csv(empty, LEADERBOARD_FILE)
+        return empty
+
+    matches_full = _load_all_matches_for_scoring()
+    if matches_full.empty:
+        save_csv(empty, LEADERBOARD_FILE)
+        return empty
+
+    preds = predictions_df.copy()
+    preds["SubmittedAt"] = pd.to_datetime(preds["SubmittedAt"], errors="coerce")
+    preds = preds.sort_values(["User", "Match", "SubmittedAt"])
+    latest = preds.drop_duplicates(subset=["User", "Match"], keep="last")
+
+    latest = latest.merge(
+        matches_full[["Match", "Result", "BigGame"]],
+        on="Match",
+        how="left",
+        suffixes=("", "_m"),
+    )
+
+    pred_counts = (
+        latest.groupby("User", as_index=False)
+        .agg(Predictions=("Match", "nunique"))
+    )
+
+    scored = latest[latest["Result"].astype(str).str.contains(r"\d{1,2}-\d{1,2}", regex=True, na=False)].copy()
+    if scored.empty:
+        lb = pred_counts.copy()
+        lb["Points"] = 0
+        lb["Exact"] = 0
+        lb["Outcome"] = 0
+        lb = lb[cols].sort_values(["Points", "Predictions", "Exact"], ascending=[False, True, False])
+        save_csv(lb, LEADERBOARD_FILE)
+        return lb
+
+    rows = []
+    for _, p in scored.iterrows():
+        mrow = matches_full[matches_full["Match"].astype(str) == str(p["Match"])]
+        if mrow.empty:
+            continue
+        m = mrow.iloc[0]
+        big = bool(m.get("BigGame", False))
+        chosen_winner = str(p.get("Winner") or "")
+        pts, ex, out = points_for_prediction(m, str(p.get("Prediction") or ""), big, chosen_winner)
+        rows.append({"User": p["User"], "Points": pts, "Exact": ex, "Outcome": out})
+
+    if not rows:
+        lb = pred_counts.copy()
+        lb["Points"] = 0
+        lb["Exact"] = 0
+        lb["Outcome"] = 0
+        lb = lb[cols].sort_values(["Points", "Predictions", "Exact"], ascending=[False, True, False])
+        save_csv(lb, LEADERBOARD_FILE)
+        return lb
+
+    per = pd.DataFrame(rows)
+    sums = (
+        per.groupby("User", as_index=False)
+        .agg(Points=("Points", "sum"), Exact=("Exact", "sum"), Outcome=("Outcome", "sum"))
+    )
+
+    lb = pred_counts.merge(sums, on="User", how="left")
+    lb["Points"] = pd.to_numeric(lb["Points"], errors="coerce").fillna(0).astype(int)
+    lb["Exact"] = pd.to_numeric(lb["Exact"], errors="coerce").fillna(0).astype(int)
+    lb["Outcome"] = pd.to_numeric(lb["Outcome"], errors="coerce").fillna(0).astype(int)
+
+    lb = lb[cols].sort_values(["Points", "Predictions", "Exact"], ascending=[False, True, False]).reset_index(drop=True)
+    save_csv(lb, LEADERBOARD_FILE)
+    return lb
+
+
+def _apply_overrides_to_lb(lb: pd.DataFrame) -> pd.DataFrame:
+    if lb.empty:
         return lb
     o = load_overrides()
-    if o is None or o.empty:
+    if o.empty:
         return lb
-    merged = lb.merge(o, on="User", how="left", suffixes=("", "_ovr"))
+    out = lb.merge(o, on="User", how="left", suffixes=("", "_ovr"))
+    if "Predictions_ovr" in out.columns:
+        out["Predictions"] = out["Predictions_ovr"].where(pd.notna(out["Predictions_ovr"]), out["Predictions"])
+    if "Points_ovr" in out.columns:
+        out["Points"] = out["Points_ovr"].where(pd.notna(out["Points_ovr"]), out["Points"])
+    out["Predictions"] = pd.to_numeric(out["Predictions"], errors="coerce").fillna(0).astype(int)
+    out["Points"] = pd.to_numeric(out["Points"], errors="coerce").fillna(0).astype(int)
+    out = out.drop(columns=[c for c in ["Predictions_ovr", "Points_ovr"] if c in out.columns], errors="ignore")
+    out = out.sort_values(["Points", "Predictions", "Exact"], ascending=[False, True, False]).reset_index(drop=True)
+    return out
 
-    def _coalesce(a, b):
-        return b if pd.notna(b) else a
 
-    if "Predictions_ovr" in merged.columns:
-        merged["Predictions"] = merged.apply(lambda r: _coalesce(r.get("Predictions"), r.get("Predictions_ovr")), axis=1)
-    if "Points_ovr" in merged.columns:
-        merged["Points"] = merged.apply(lambda r: _coalesce(r.get("Points"), r.get("Points_ovr")), axis=1)
+def page_play_and_leaderboard(LANG_CODE: str, tz: ZoneInfo):
+    apply_theme()
 
-    merged["Points"] = pd.to_numeric(merged["Points"], errors="coerce").fillna(0).astype(int)
-    merged["Predictions"] = pd.to_numeric(merged["Predictions"], errors="coerce").fillna(0).astype(int)
-    merged["Exact"] = pd.to_numeric(merged.get("Exact", 0), errors="coerce").fillna(0).astype(int)
-    merged["Outcome"] = pd.to_numeric(merged.get("Outcome", 0), errors="coerce").fillna(0).astype(int)
+    season_name = ""
+    if os.path.exists(SEASON_FILE):
+        try:
+            with open(SEASON_FILE, "r", encoding="utf-8") as f:
+                season_name = f.read().strip()
+        except Exception:
+            pass
 
-    merged = merged.sort_values(["Points", "Predictions", "Exact"], ascending=[False, True, False]).reset_index(drop=True)
-    return merged[["User", "Points", "Predictions", "Exact", "Outcome"]]
+    st.title(f"{tr(LANG_CODE, 'app_title')}" + (f" — {season_name}" if season_name else ""))
+    show_welcome_top_right(st.session_state.get("current_name"), LANG_CODE)
+
+    matches_df = load_csv(
+        MATCHES_FILE,
+        ["Match", "Kickoff", "Result", "HomeLogo", "AwayLogo", "BigGame", "RealWinner", "Occasion", "OccasionLogo", "Round"],
+    )
+    predictions_df = load_csv(PREDICTIONS_FILE, ["User", "Match", "Prediction", "Winner", "SubmittedAt"])
+
+    tab1, tab2 = st.tabs([f"🎮 {tr(LANG_CODE,'tab_play')}", f"🏆 {tr(LANG_CODE,'tab_leaderboard')}"])
+
+    with tab1:
+        current_name = st.session_state.get("current_name")
+
+        if matches_df.empty:
+            st.info(tr(LANG_CODE, "no_matches"))
+        else:
+            tmp = matches_df.copy()
+            tmp["KO"] = tmp["Kickoff"].apply(parse_iso_dt)
+            tmp = tmp.sort_values("KO").reset_index(drop=True)
+
+            for idx, row in tmp.iterrows():
+                match = row.get("Match")
+                team_a, team_b = split_match_name(match)
+                ko = row.get("KO")
+                big = bool(row.get("BigGame", False))
+
+                with st.container():
+                    c_logo_a, c_logo_mid, c_logo_b = st.columns([1, 1, 1])
+                    with c_logo_a:
+                        show_logo_safe(row.get("HomeLogo"), width=56, caption=team_a or " ")
+                    with c_logo_mid:
+                        show_logo_safe(row.get("OccasionLogo"), width=56, caption=row.get("Occasion") or " ")
+                    with c_logo_b:
+                        show_logo_safe(row.get("AwayLogo"), width=56, caption=team_b or " ")
+
+                    st.markdown(f"### {team_a} &nbsp;vs&nbsp; {team_b}")
+
+                    aux = []
+                    if row.get("Round"):
+                        aux.append(f"**{tr(LANG_CODE,'round')}**: {row.get('Round')}")
+                    if row.get("Occasion"):
+                        aux.append(f"**{tr(LANG_CODE,'occasion')}**: {row.get('Occasion')}")
+                    if aux:
+                        st.caption(" | ".join(aux))
+
+                    ko_txt = format_dt_ampm(ko, tz, LANG_CODE)
+                    st.caption(f"{tr(LANG_CODE,'kickoff')}: {ko_txt}")
+
+                    if big:
+                        st.markdown(f"<span class='badge-gold'>{tr(LANG_CODE,'gold_badge')}</span>", unsafe_allow_html=True)
+
+                    if ko:
+                        open_at = to_tz(ko, tz) - timedelta(hours=2)
+                        close_at = to_tz(ko, tz)
+                        now_local = datetime.now(tz)
+
+                        if now_local < open_at:
+                            remain = open_at - now_local
+                            st.info(f"{tr(LANG_CODE,'opens_in')}: {human_delta(remain, LANG_CODE)}")
+                        elif open_at <= now_local < close_at:
+                            if not current_name:
+                                st.warning(tr(LANG_CODE, "please_login_first"))
+                            else:
+                                already = predictions_df[
+                                    (predictions_df["User"].astype(str) == str(current_name)) &
+                                    (predictions_df["Match"].astype(str) == str(match))
+                                ]
+                                if not already.empty:
+                                    st.info(tr(LANG_CODE, "already_submitted"))
+                                else:
+                                    short_hash = abs(hash(str(match))) % 1_000_000_000
+                                    score_key = f"pred_score_{idx}_{short_hash}"
+                                    sel_key = f"pred_winner_{idx}_{short_hash}"
+                                    btn_key = f"btn_{idx}_{short_hash}"
+
+                                    raw = st.text_input(tr(LANG_CODE, "score"), key=score_key)
+                                    val = normalize_digits(raw or "").strip()
+
+                                    parsed = _parse_score(val) if val else None
+                                    is_draw_typed = bool(parsed and parsed[0] == parsed[1])
+
+                                    options = [team_a, team_b, tr(LANG_CODE, "draw")]
+                                    winner = st.selectbox(
+                                        tr(LANG_CODE, "winner"),
+                                        options=options,
+                                        index=2 if is_draw_typed else 0,
+                                        key=sel_key,
+                                        disabled=is_draw_typed,
+                                    )
+
+                                    if st.button(tr(LANG_CODE, "submit_btn"), key=btn_key):
+                                        parsed2 = _parse_score(val)
+                                        if not parsed2:
+                                            st.error(tr(LANG_CODE, "fmt_error"))
+                                        else:
+                                            h1, h2 = parsed2
+                                            if h1 == h2:
+                                                winner = tr(LANG_CODE, "draw")
+                                            new_pred = pd.DataFrame([{
+                                                "User": current_name,
+                                                "Match": match,
+                                                "Prediction": f"{h1}-{h2}",
+                                                "Winner": winner,
+                                                "SubmittedAt": datetime.now(ZoneInfo("UTC")).isoformat(),
+                                            }])
+                                            predictions_df = pd.concat([predictions_df, new_pred], ignore_index=True)
+                                            save_csv(predictions_df, PREDICTIONS_FILE)
+                                            recompute_leaderboard(predictions_df)
+                                            st.success(tr(LANG_CODE, "saved_ok"))
+                        else:
+                            st.caption(f"🔒 {tr(LANG_CODE,'closed')}")
+
+    with tab2:
+        preds = load_csv(PREDICTIONS_FILE, ["User", "Match", "Prediction", "Winner", "SubmittedAt"])
+        base_lb = recompute_leaderboard(preds)
+        lb = _apply_overrides_to_lb(base_lb)
+
+        st.subheader(tr(LANG_CODE, "leaderboard"))
+        if lb.empty:
+            st.info(tr(LANG_CODE, "no_scores_yet"))
+        else:
+            lb = lb.reset_index(drop=True)
+            lb.insert(0, tr(LANG_CODE, "lb_rank"), range(1, len(lb) + 1))
+
+            medals = []
+            for i in lb.index:
+                r_int = int(lb.loc[i, tr(LANG_CODE, "lb_rank")])
+                medals.append("🥇" if r_int == 1 else "🥈" if r_int == 2 else "🥉" if r_int == 3 else "")
+            lb[tr(LANG_CODE, "lb_rank")] = lb[tr(LANG_CODE, "lb_rank")].astype(str) + " " + pd.Series(medals)
+
+            col_map = {
+                "User": tr(LANG_CODE, "lb_user"),
+                "Predictions": tr(LANG_CODE, "lb_preds"),
+                "Exact": tr(LANG_CODE, "lb_exact"),
+                "Outcome": tr(LANG_CODE, "lb_outcome"),
+                "Points": tr(LANG_CODE, "lb_points"),
+            }
+            show = lb[[tr(LANG_CODE, "lb_rank"), "User", "Predictions", "Exact", "Outcome", "Points"]].rename(columns=col_map)
+            st.dataframe(show, use_container_width=True)
+
 
 def page_admin(LANG_CODE: str, tz: ZoneInfo):
     apply_theme()
     st.title(f"🔑 {tr(LANG_CODE,'admin_panel')}")
     show_welcome_top_right(st.session_state.get("current_name") or "Admin", LANG_CODE)
 
-    preds_all = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+    preds_all = load_csv(PREDICTIONS_FILE, ["User", "Match", "Prediction", "Winner", "SubmittedAt"])
     recompute_leaderboard(preds_all)
 
     tab_matches, tab_predictions, tab_settings, tab_users, tab_manual = st.tabs([
@@ -1106,18 +1421,18 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
         with st.expander(f"{tr(LANG_CODE,'add_match')}", expanded=True):
             colA, colB = st.columns(2)
             with colA:
-                teamA = st.text_input(tr(LANG_CODE,"team_a"), key="add_team_a")
-                urlA  = st.text_input(tr(LANG_CODE,"home_logo_url"), value=get_saved_logo(teamA) or "", key="add_url_a")
-                upA   = st.file_uploader(tr(LANG_CODE,"home_logo_upload"), type=["png","jpg","jpeg","webp","gif","bmp"], key="add_up_a")
+                teamA = st.text_input(tr(LANG_CODE, "team_a"), key="add_team_a")
+                urlA = st.text_input(tr(LANG_CODE, "home_logo_url"), value=get_saved_logo(teamA) or "", key="add_url_a")
+                upA = st.file_uploader(tr(LANG_CODE, "home_logo_upload"), type=["png", "jpg", "jpeg", "webp", "gif", "bmp"], key="add_up_a")
                 if upA is not None:
                     st.image(upA, width=56)
                 else:
                     show_logo_safe(urlA or get_saved_logo(teamA), width=56, caption=teamA or " ")
 
             with colB:
-                teamB = st.text_input(tr(LANG_CODE,"team_b"), key="add_team_b")
-                urlB  = st.text_input(tr(LANG_CODE,"away_logo_url"), value=get_saved_logo(teamB) or "", key="add_url_b")
-                upB   = st.file_uploader(tr(LANG_CODE,"away_logo_upload"), type=["png","jpg","jpeg","webp","gif","bmp"], key="add_up_b")
+                teamB = st.text_input(tr(LANG_CODE, "team_b"), key="add_team_b")
+                urlB = st.text_input(tr(LANG_CODE, "away_logo_url"), value=get_saved_logo(teamB) or "", key="add_url_b")
+                upB = st.file_uploader(tr(LANG_CODE, "away_logo_upload"), type=["png", "jpg", "jpeg", "webp", "gif", "bmp"], key="add_up_b")
                 if upB is not None:
                     st.image(upB, width=56)
                 else:
@@ -1125,34 +1440,36 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
 
             colO1, colO2 = st.columns(2)
             with colO1:
-                occ = st.text_input(tr(LANG_CODE,"occasion"), key="add_occasion")
-                occ_url = st.text_input(tr(LANG_CODE,"occasion_logo_url"), key="add_occ_url")
-                occ_up  = st.file_uploader(tr(LANG_CODE,"occasion_logo_upload"), type=["png","jpg","jpeg","webp","gif","bmp"], key="add_occ_up")
+                occ = st.text_input(tr(LANG_CODE, "occasion"), key="add_occasion")
+                occ_url = st.text_input(tr(LANG_CODE, "occasion_logo_url"), key="add_occ_url")
+                occ_up = st.file_uploader(tr(LANG_CODE, "occasion_logo_upload"), type=["png", "jpg", "jpeg", "webp", "gif", "bmp"], key="add_occ_up")
                 if occ_up is not None:
                     st.image(occ_up, width=56)
                 else:
                     show_logo_safe(occ_url, width=56, caption=occ or " ")
             with colO2:
-                rnd = st.text_input(tr(LANG_CODE,"round"), key="add_round")
+                rnd = st.text_input(tr(LANG_CODE, "round"), key="add_round")
 
-            colD1, colD2, colD3, colD4, colD5 = st.columns([1,1,1,1,1])
+            colD1, colD2, colD3, colD4, colD5 = st.columns([1, 1, 1, 1, 1])
             with colD1:
                 tz_local = ZoneInfo("Asia/Riyadh")
-                date_val = st.date_input(tr(LANG_CODE,"date_label"), value=datetime.now(tz_local).date(), key="add_date")
+                date_val = st.date_input(tr(LANG_CODE, "date_label"), value=datetime.now(tz_local).date(), key="add_date")
             with colD2:
-                hour = st.number_input(tr(LANG_CODE,"hour"), min_value=1, max_value=12, value=9, key="add_hour")
+                hour = st.number_input(tr(LANG_CODE, "hour"), min_value=1, max_value=12, value=9, key="add_hour")
             with colD3:
-                minute = st.number_input(tr(LANG_CODE,"minute"), min_value=0, max_value=59, value=0, key="add_minute")
+                minute = st.number_input(tr(LANG_CODE, "minute"), min_value=0, max_value=59, value=0, key="add_minute")
             with colD4:
-                ampm = st.selectbox(tr(LANG_CODE,"ampm"), [tr(LANG_CODE,"ampm_am"), tr(LANG_CODE,"ampm_pm")], key="add_ampm")
+                am_label = tr(LANG_CODE, "ampm_am")
+                pm_label = tr(LANG_CODE, "ampm_pm")
+                ampm = st.selectbox(tr(LANG_CODE, "ampm"), [am_label, pm_label], key="add_ampm")
             with colD5:
-                big = st.checkbox(tr(LANG_CODE,"big_game"), key="add_big")
+                big = st.checkbox(tr(LANG_CODE, "big_game"), key="add_big")
 
-            if st.button(tr(LANG_CODE,"btn_add_match"), key="btn_add_match"):
+            if st.button(tr(LANG_CODE, "btn_add_match"), key="btn_add_match"):
                 if not teamA or not teamB:
                     st.error(tr(LANG_CODE, "enter_both_teams"))
                 else:
-                    is_pm = (ampm in ["PM","مساء"])
+                    is_pm = ampm in ["PM", "مساء"]
                     hour24 = (0 if int(hour) == 12 else int(hour)) + (12 if is_pm else 0)
                     ko = datetime.combine(date_val, dtime(hour24, int(minute))).replace(tzinfo=tz_local)
 
@@ -1184,7 +1501,7 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     if teamB and away_logo:
                         save_team_logo(teamB, away_logo)
 
-                    m = load_csv(MATCHES_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round"])
+                    m = load_csv(MATCHES_FILE, ["Match", "Kickoff", "Result", "HomeLogo", "AwayLogo", "BigGame", "RealWinner", "Occasion", "OccasionLogo", "Round"])
                     row = pd.DataFrame([{
                         "Match": f"{teamA} vs {teamB}",
                         "Kickoff": ko.isoformat(),
@@ -1199,15 +1516,15 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                     }])
                     m = pd.concat([m, row], ignore_index=True)
                     save_csv(m, MATCHES_FILE)
-                    st.success(tr(LANG_CODE,"match_added"))
+                    st.success(tr(LANG_CODE, "match_added"))
                     st.rerun()
 
         st.markdown("---")
-        st.markdown(f"### {tr(LANG_CODE,'edit_matches')}")
 
-        mdf = load_csv(MATCHES_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round"])
+        st.markdown(f"### {tr(LANG_CODE,'edit_matches')}")
+        mdf = load_csv(MATCHES_FILE, ["Match", "Kickoff", "Result", "HomeLogo", "AwayLogo", "BigGame", "RealWinner", "Occasion", "OccasionLogo", "Round"])
         if mdf.empty:
-            st.info(tr(LANG_CODE,"no_matches"))
+            st.info(tr(LANG_CODE, "no_matches"))
         else:
             mdf["KO"] = mdf["Kickoff"].apply(parse_iso_dt)
             mdf = mdf.sort_values("KO").reset_index(drop=True)
@@ -1219,57 +1536,53 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
 
                 c1, c2, c3 = st.columns(3)
                 with c1:
-                    new_team_a = st.text_input(tr(LANG_CODE,"team_a"), value=team_a, key=f"edit_team_a_{idx}")
-                    new_url_a  = st.text_input(tr(LANG_CODE,"home_logo_url"), value=str(row.get("HomeLogo") or ""), key=f"edit_url_a_{idx}")
+                    new_team_a = st.text_input(tr(LANG_CODE, "team_a"), value=team_a, key=f"edit_team_a_{idx}")
+                    new_url_a = st.text_input(tr(LANG_CODE, "home_logo_url"), value=str(row.get("HomeLogo") or ""), key=f"edit_url_a_{idx}")
                     show_logo_safe(new_url_a or get_saved_logo(new_team_a), width=56, caption=new_team_a or " ")
                 with c2:
-                    new_occ = st.text_input(tr(LANG_CODE,"occasion"), value=str(row.get("Occasion") or ""), key=f"edit_occ_{idx}")
-                    new_occ_url  = st.text_input(tr(LANG_CODE,"occasion_logo_url"), value=str(row.get("OccasionLogo") or ""), key=f"edit_occ_url_{idx}")
+                    new_occ = st.text_input(tr(LANG_CODE, "occasion"), value=str(row.get("Occasion") or ""), key=f"edit_occ_{idx}")
+                    new_occ_url = st.text_input(tr(LANG_CODE, "occasion_logo_url"), value=str(row.get("OccasionLogo") or ""), key=f"edit_occ_url_{idx}")
                     show_logo_safe(new_occ_url, width=56, caption=new_occ or " ")
                 with c3:
-                    new_team_b = st.text_input(tr(LANG_CODE,"team_b"), value=team_b, key=f"edit_team_b_{idx}")
-                    new_url_b  = st.text_input(tr(LANG_CODE,"away_logo_url"), value=str(row.get("AwayLogo") or ""), key=f"edit_url_b_{idx}")
+                    new_team_b = st.text_input(tr(LANG_CODE, "team_b"), value=team_b, key=f"edit_team_b_{idx}")
+                    new_url_b = st.text_input(tr(LANG_CODE, "away_logo_url"), value=str(row.get("AwayLogo") or ""), key=f"edit_url_b_{idx}")
                     show_logo_safe(new_url_b or get_saved_logo(new_team_b), width=56, caption=new_team_b or " ")
 
                 rcol = st.columns(3)
                 with rcol[0]:
-                    new_round = st.text_input(tr(LANG_CODE,"round"), value=str(row.get("Round") or ""), key=f"edit_round_{idx}")
+                    new_round = st.text_input(tr(LANG_CODE, "round"), value=str(row.get("Round") or ""), key=f"edit_round_{idx}")
                 with rcol[1]:
                     local_ko = to_tz(row["KO"], tz) if row["KO"] else None
                     use_date = local_ko.date() if local_ko else datetime.now(tz).date()
-                    nd = st.date_input(tr(LANG_CODE,"date_label"), value=use_date, key=f"edit_date_{idx}")
+                    nd = st.date_input(tr(LANG_CODE, "date_label"), value=use_date, key=f"edit_date_{idx}")
                 with rcol[2]:
                     local_ko = to_tz(row["KO"], tz) if row["KO"] else None
                     hr12 = (local_ko.hour % 12) or 12 if local_ko else 9
                     minutes = local_ko.minute if local_ko else 0
-                    ap = tr(LANG_CODE,"ampm_pm") if (local_ko and local_ko.hour >= 12) else tr(LANG_CODE,"ampm_am")
-                    nh = st.number_input(tr(LANG_CODE,"hour"), min_value=1, max_value=12, value=hr12, key=f"edit_hour_{idx}")
-                    nm = st.number_input(tr(LANG_CODE,"minute"), min_value=0, max_value=59, value=minutes, key=f"edit_min_{idx}")
-                    nap = st.selectbox(tr(LANG_CODE,"ampm"), [tr(LANG_CODE,"ampm_am"), tr(LANG_CODE,"ampm_pm")],
-                                       index=0 if ap==tr(LANG_CODE,"ampm_am") else 1, key=f"edit_ampm_{idx}")
+                    ap = tr(LANG_CODE, "ampm_pm") if (local_ko and local_ko.hour >= 12) else tr(LANG_CODE, "ampm_am")
+                    nh = st.number_input(tr(LANG_CODE, "hour"), min_value=1, max_value=12, value=int(hr12), key=f"edit_hour_{idx}")
+                    nm = st.number_input(tr(LANG_CODE, "minute"), min_value=0, max_value=59, value=int(minutes), key=f"edit_min_{idx}")
+                    nap = st.selectbox(tr(LANG_CODE, "ampm"), [tr(LANG_CODE, "ampm_am"), tr(LANG_CODE, "ampm_pm")], index=0 if ap == tr(LANG_CODE, "ampm_am") else 1, key=f"edit_ampm_{idx}")
 
-                big_val = st.checkbox(tr(LANG_CODE,"big_game"), value=bool(row.get("BigGame", False)), key=f"edit_big_{idx}")
+                big_val = st.checkbox(tr(LANG_CODE, "big_game"), value=bool(row.get("BigGame", False)), key=f"edit_big_{idx}")
 
-                e1, e2 = st.columns([1,1])
+                e1, e2 = st.columns([1, 1])
                 with e1:
-                    res = st.text_input(tr(LANG_CODE,"final_score"), value=str(row.get("Result") or ""), key=f"edit_res_{idx}")
+                    res = st.text_input(tr(LANG_CODE, "final_score"), value=str(row.get("Result") or ""), key=f"edit_res_{idx}")
                 with e2:
-                    opts = [new_team_a, new_team_b, tr(LANG_CODE,"draw")]
-                    curw = row.get("RealWinner") or tr(LANG_CODE,"draw")
-                    pr = parse_score(str(row.get("Result") or ""))
-                    if pr:
-                        ra, rb = pr
-                        curw = tr(LANG_CODE,"draw") if ra == rb else (new_team_a if ra > rb else new_team_b)
-                    realw = st.selectbox(tr(LANG_CODE,"real_winner"),
-                                         options=opts, index=opts.index(curw) if curw in opts else len(opts)-1,
-                                         key=f"edit_realw_{idx}")
+                    opts = [new_team_a, new_team_b, tr(LANG_CODE, "draw")]
+                    curw = row.get("RealWinner") or tr(LANG_CODE, "draw")
+                    if isinstance(row.get("Result"), str) and "-" in str(row.get("Result")) and _parse_score(str(row.get("Result"))):
+                        rw = _winner_from_score(row["Match"], str(row.get("Result")))
+                        curw = tr(LANG_CODE, "draw") if rw == "Draw" else rw
+                    realw = st.selectbox(tr(LANG_CODE, "real_winner"), options=opts, index=opts.index(curw) if curw in opts else len(opts) - 1, key=f"edit_realw_{idx}")
 
-                col_actions1, col_actions2, col_actions3 = st.columns([1,1,1])
+                col_actions1, col_actions2, col_actions3 = st.columns([1, 1, 1])
 
                 with col_actions1:
-                    if st.button(tr(LANG_CODE,"save"), key=f"btn_save_details_{idx}"):
-                        ispm = (nap in ["PM","مساء"])
-                        hr24 = (0 if int(nh)==12 else int(nh)) + (12 if ispm else 0)
+                    if st.button(tr(LANG_CODE, "save") + " (Details)", key=f"btn_save_details_{idx}"):
+                        ispm = nap in ["PM", "مساء"]
+                        hr24 = (0 if int(nh) == 12 else int(nh)) + (12 if ispm else 0)
                         new_ko = datetime(nd.year, nd.month, nd.day, hr24, int(nm), tzinfo=tz)
 
                         final_logo_a = cache_logo_from_url(new_url_a) or (str(new_url_a).strip() if str(new_url_a).strip() else None)
@@ -1282,29 +1595,27 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                             save_team_logo(new_team_b, final_logo_b)
 
                         new_match_name = f"{new_team_a} vs {new_team_b}"
-                        mdf.loc[mdf["Match"] == row["Match"], ["Match","Kickoff","HomeLogo","AwayLogo","BigGame","Occasion","OccasionLogo","Round"]] = [
-                            new_match_name, new_ko.isoformat(), final_logo_a, final_logo_b, bool(big_val),
-                            new_occ or "", final_occ_logo, new_round or ""
+                        mdf.loc[mdf["Match"] == row["Match"], ["Match", "Kickoff", "HomeLogo", "AwayLogo", "BigGame", "Occasion", "OccasionLogo", "Round"]] = [
+                            new_match_name, new_ko.isoformat(), final_logo_a, final_logo_b, bool(big_val), new_occ or "", final_occ_logo, new_round or ""
                         ]
                         save_csv(mdf, MATCHES_FILE)
-                        st.success(tr(LANG_CODE,"updated"))
+                        st.success(tr(LANG_CODE, "updated"))
                         st.rerun()
 
                 with col_actions2:
-                    if st.button(tr(LANG_CODE,"save") + " (Score)", key=f"btn_save_score_{idx}"):
-                        pair = parse_score(res or "")
-                        if (res or "").strip() and not pair:
-                            st.error(tr(LANG_CODE,"fmt_error"))
+                    if st.button(tr(LANG_CODE, "save") + " (Score)", key=f"btn_save_score_{idx}"):
+                        val = normalize_digits(res or "").strip()
+                        if val and not _parse_score(val):
+                            st.error(tr(LANG_CODE, "fmt_error"))
                         else:
-                            val = f"{pair[0]}-{pair[1]}" if pair else None
-                            mdf.loc[mdf["Match"] == row["Match"], ["Result","RealWinner"]] = [(val if val else None), (realw or "")]
+                            mdf.loc[mdf["Match"] == row["Match"], ["Result", "RealWinner"]] = [(val if val else None), (realw or "")]
                             save_csv(mdf, MATCHES_FILE)
 
-                            preds_now = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+                            preds_now = load_csv(PREDICTIONS_FILE, ["User", "Match", "Prediction", "Winner", "SubmittedAt"])
                             recompute_leaderboard(preds_now)
 
                             if val:
-                                hist = load_csv(MATCH_HISTORY_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","CompletedAt"])
+                                hist = load_csv(MATCH_HISTORY_FILE, ["Match", "Kickoff", "Result", "HomeLogo", "AwayLogo", "BigGame", "RealWinner", "Occasion", "OccasionLogo", "Round", "CompletedAt"])
                                 hist = ensure_history_schema(hist)
                                 current_row = mdf[mdf["Match"] == row["Match"]].copy()
                                 current_row["CompletedAt"] = datetime.now(ZoneInfo("UTC")).isoformat()
@@ -1314,29 +1625,29 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                                 mdf = mdf[mdf["Match"] != row["Match"]]
                                 save_csv(mdf, MATCHES_FILE)
 
-                            st.success(tr(LANG_CODE,"updated"))
+                            st.success(tr(LANG_CODE, "updated"))
                             st.rerun()
 
                 with col_actions3:
-                    if st.button(tr(LANG_CODE,"delete"), key=f"btn_del_{idx}"):
+                    if st.button(tr(LANG_CODE, "delete"), key=f"btn_del_{idx}"):
                         mdf = mdf[mdf["Match"] != row["Match"]]
                         save_csv(mdf, MATCHES_FILE)
 
-                        p = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+                        p = load_csv(PREDICTIONS_FILE, ["User", "Match", "Prediction", "Winner", "SubmittedAt"])
                         p = p[p["Match"] != row["Match"]]
                         save_csv(p, PREDICTIONS_FILE)
                         recompute_leaderboard(p)
 
-                        st.success(tr(LANG_CODE,"deleted"))
+                        st.success(tr(LANG_CODE, "deleted"))
                         st.rerun()
 
         st.markdown("---")
         st.markdown(f"### {tr(LANG_CODE,'match_history')}")
-
-        hist = load_csv(MATCH_HISTORY_FILE, ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round","CompletedAt"])
+        hist = load_csv(MATCH_HISTORY_FILE, ["Match", "Kickoff", "Result", "HomeLogo", "AwayLogo", "BigGame", "RealWinner", "Occasion", "OccasionLogo", "Round", "CompletedAt"])
         hist = ensure_history_schema(hist)
+
         if hist.empty:
-            st.info(tr(LANG_CODE,"no_matches"))
+            st.info(tr(LANG_CODE, "no_matches"))
         else:
             tz_local = ZoneInfo("Asia/Riyadh")
             view = hist.copy()
@@ -1345,33 +1656,30 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
             view = view.sort_values("CompletedAt", ascending=False)
             view["Kickoff"] = view["Kickoff"].apply(lambda x: format_dt_ampm(x, tz_local, LANG_CODE))
             view["CompletedAt"] = view["CompletedAt"].dt.strftime("%Y-%m-%d %H:%M")
-            st.dataframe(view[["Match","Kickoff","Result","RealWinner","Occasion","Round","CompletedAt"]], use_container_width=True)
+            st.dataframe(view[["Match", "Kickoff", "Result", "RealWinner", "Occasion", "Round", "CompletedAt"]], use_container_width=True)
 
     with tab_predictions:
         st.subheader("👀 Predictions (View & Delete)")
 
-        preds_view = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
-        matches_view = load_csv(MATCHES_FILE, ["Match","Kickoff","Result","Round"])
-        hist_view = load_csv(MATCH_HISTORY_FILE, ["Match","Kickoff","Result","Round","CompletedAt"])
+        preds_view = load_csv(PREDICTIONS_FILE, ["User", "Match", "Prediction", "Winner", "SubmittedAt"])
+        matches_view = load_csv(MATCHES_FILE, ["Match", "Kickoff", "Result", "Round"])
+        hist_view = load_csv(MATCH_HISTORY_FILE, ["Match", "Kickoff", "Result", "Round", "CompletedAt"])
 
         all_matches_for_view = pd.concat([
             matches_view.assign(Status="Open"),
-            hist_view.drop(columns=["CompletedAt"], errors="ignore").assign(Status="Closed")
+            hist_view.drop(columns=["CompletedAt"], errors="ignore").assign(Status="Closed"),
         ], ignore_index=True)
 
-        df_preds_full = preds_view.merge(
-            all_matches_for_view[["Match","Kickoff","Result","Round","Status"]],
-            on="Match", how="left"
-        )
+        df_preds_full = preds_view.merge(all_matches_for_view[["Match", "Kickoff", "Result", "Round", "Status"]], on="Match", how="left")
 
         df_preds_full["SubmittedAt_dt"] = pd.to_datetime(df_preds_full["SubmittedAt"], errors="coerce")
-        df_preds_full = df_preds_full.sort_values(["User","Match","SubmittedAt_dt"]).reset_index(drop=True)
+        df_preds_full = df_preds_full.sort_values(["User", "Match", "SubmittedAt_dt"]).reset_index(drop=True)
 
-        col_f1, col_f2, col_f3 = st.columns([1,1,1])
+        col_f1, col_f2, col_f3 = st.columns([1, 1, 1])
         with col_f1:
             user_filter = st.selectbox("Filter by user", options=["(All)"] + sorted(df_preds_full["User"].dropna().unique().tolist()), key="preds_filter_user")
         with col_f2:
-            status_filter = st.selectbox("Filter by status", options=["(All)","Open","Closed"], key="preds_filter_status")
+            status_filter = st.selectbox("Filter by status", options=["(All)", "Open", "Closed"], key="preds_filter_status")
         with col_f3:
             match_filter = st.selectbox("Filter by match", options=["(All)"] + sorted(df_preds_full["Match"].dropna().unique().tolist()), key="preds_filter_match")
 
@@ -1383,20 +1691,20 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
         if match_filter != "(All)":
             view_df = view_df[view_df["Match"] == match_filter]
 
-        show_cols = ["User","Match","Prediction","Winner","Result","Round","Status","SubmittedAt"]
+        show_cols = ["User", "Match", "Prediction", "Winner", "Result", "Round", "Status", "SubmittedAt"]
         view_df["SubmittedAt"] = view_df["SubmittedAt_dt"].dt.strftime("%Y-%m-%d %H:%M")
         st.dataframe(view_df[show_cols], use_container_width=True)
 
         st.markdown("---")
-        st.markdown("### 🧹 Delete all predictions for a match")
 
+        st.markdown("### 🧹 Delete all predictions for a match")
         all_matches_list = sorted(preds_view["Match"].dropna().unique().tolist())
         if not all_matches_list:
             st.info("No predictions to delete yet.")
         else:
             delm = st.selectbox("Select match", options=all_matches_list, key="del_all_match_pick")
             if st.button("Delete ALL predictions for this match", key="btn_del_all_match_preds"):
-                p = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+                p = load_csv(PREDICTIONS_FILE, ["User", "Match", "Prediction", "Winner", "SubmittedAt"])
                 before = len(p)
                 p = p[p["Match"] != delm]
                 after = len(p)
@@ -1408,12 +1716,12 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
         st.markdown("---")
         st.markdown("### 🎯 Delete a selected prediction")
 
-        preds_now = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+        preds_now = load_csv(PREDICTIONS_FILE, ["User", "Match", "Prediction", "Winner", "SubmittedAt"])
         if preds_now.empty:
             st.info("No predictions to delete.")
         else:
             preds_now["SubmittedAt_dt"] = pd.to_datetime(preds_now["SubmittedAt"], errors="coerce")
-            preds_now = preds_now.sort_values(["User","Match","SubmittedAt_dt"]).reset_index(drop=True)
+            preds_now = preds_now.sort_values(["User", "Match", "SubmittedAt_dt"]).reset_index(drop=True)
 
             choices = []
             for i, r in preds_now.iterrows():
@@ -1433,7 +1741,8 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                         st.error("Selection out of range.")
                     else:
                         row = preds_now.iloc[i]
-                        p = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+                        p = load_csv(PREDICTIONS_FILE, ["User", "Match", "Prediction", "Winner", "SubmittedAt"])
+
                         mask = (
                             (p["User"].astype(str) == str(row["User"])) &
                             (p["Match"].astype(str) == str(row["Match"])) &
@@ -1447,342 +1756,314 @@ def page_admin(LANG_CODE: str, tz: ZoneInfo):
                         recompute_leaderboard(p)
                         st.success(f"Deleted {removed} row(s) ✅")
                         st.rerun()
-
+# =========================
+# app.py (PART 6/6)
+# =========================
     with tab_settings:
-        st.info("Continue to Part 6 to paste Settings (Season + Test Data + Backup/Restore).")
+        st.subheader("⚙️ Settings")
+
+        with st.expander("🏁 Season", expanded=True):
+            current_season = ""
+            if os.path.exists(SEASON_FILE):
+                try:
+                    with open(SEASON_FILE, "r", encoding="utf-8") as f:
+                        current_season = f.read().strip()
+                except Exception:
+                    pass
+
+            season_name = st.text_input(
+                tr(LANG_CODE, "season_name_label"),
+                value=current_season,
+                key="season_name_settings_tab",
+            )
+
+            c1, c2, c3 = st.columns([1, 1, 2])
+            with c1:
+                if st.button("Save season name", key="btn_save_season_settings_tab"):
+                    try:
+                        with open(SEASON_FILE, "w", encoding="utf-8") as f:
+                            f.write((season_name or "").strip())
+                        st.success(tr(LANG_CODE, "season_saved"))
+                    except Exception as e:
+                        st.error(str(e))
+
+            with c2:
+                if st.button("Reset season (danger)", key="btn_reset_season_settings_tab"):
+                    def _safe_remove(p):
+                        try:
+                            if os.path.exists(p):
+                                os.remove(p)
+                        except Exception:
+                            pass
+
+                    for f in [
+                        USERS_FILE, MATCHES_FILE, MATCH_HISTORY_FILE,
+                        PREDICTIONS_FILE, LEADERBOARD_FILE,
+                        SEASON_FILE, LEADERBOARD_OVERRIDES_FILE,
+                        OTP_FILE
+                    ]:
+                        _safe_remove(f)
+
+                    st.session_state.pop("role", None)
+                    st.session_state.pop("current_name", None)
+                    st.success(tr(LANG_CODE, "reset_confirm"))
+                    st.rerun()
+
+            with c3:
+                st.caption("Reset clears users/matches/predictions/leaderboard/overrides/OTP. Team logos are kept.")
+
+        with st.expander("🧪 Insert Test Data", expanded=False):
+            if st.button(tr(LANG_CODE, "test_data"), key="btn_test_data_settings_tab"):
+                tz_local = ZoneInfo("Asia/Riyadh")
+                now = datetime.now(tz_local)
+                samples = [
+                    ("Real Madrid", "Barcelona",
+                     "https://upload.wikimedia.org/wikipedia/en/5/56/Real_Madrid_CF.svg",
+                     "https://upload.wikimedia.org/wikipedia/en/4/47/FC_Barcelona_%28crest%29.svg",
+                     now + timedelta(days=1), 9, 0, tr(LANG_CODE, "ampm_pm"), True, "El Clásico",
+                     "https://upload.wikimedia.org/wikipedia/commons/8/8f/Trophy_icon.png", "Round 1"),
+                    ("Al Hilal", "Al Nassr",
+                     "https://upload.wikimedia.org/wikipedia/en/f/f1/Al_Hilal_SFC_Logo.svg",
+                     "https://upload.wikimedia.org/wikipedia/en/5/53/Al-Nassr_logo_2020.svg",
+                     now + timedelta(days=3), 9, 0, tr(LANG_CODE, "ampm_pm"), False, "Saudi Derby",
+                     "https://upload.wikimedia.org/wikipedia/commons/8/8f/Trophy_icon.png", "Round 2"),
+                ]
+
+                cols = ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round"]
+                m = load_csv(MATCHES_FILE, cols)
+
+                for A, B, Au, Bu, dt_, hr, mi, ap, big, occ, occlogo, rnd in samples:
+                    is_pm = (ap in ["PM","مساء"])
+                    hr24 = (0 if hr == 12 else int(hr)) + (12 if is_pm else 0)
+                    ko = datetime(dt_.year, dt_.month, dt_.day, hr24, int(mi), tzinfo=tz_local)
+
+                    A_logo = cache_logo_from_url(Au) or Au
+                    B_logo = cache_logo_from_url(Bu) or Bu
+                    occ_logo = cache_logo_from_url(occlogo) or occlogo
+
+                    save_team_logo(A, A_logo)
+                    save_team_logo(B, B_logo)
+
+                    row = pd.DataFrame([{
+                        "Match": f"{A} vs {B}",
+                        "Kickoff": ko.isoformat(),
+                        "Result": None,
+                        "HomeLogo": A_logo,
+                        "AwayLogo": B_logo,
+                        "BigGame": bool(big),
+                        "RealWinner": "",
+                        "Occasion": occ,
+                        "OccasionLogo": occ_logo,
+                        "Round": rnd,
+                    }])
+                    m = pd.concat([m, row], ignore_index=True)
+
+                save_csv(m, MATCHES_FILE)
+                st.success(tr(LANG_CODE, "test_done"))
+                st.rerun()
+
+        with st.expander("📦 Backup & Restore", expanded=True):
+            bcol1, bcol2 = st.columns([1, 1])
+
+            with bcol1:
+                if st.button("⬇️ Backup Now", key="btn_backup_now_settings_tab"):
+                    buf = create_backup_zip()
+                    st.download_button(
+                        "Download prediction_backup.zip",
+                        data=buf.getvalue(),
+                        file_name="prediction_backup.zip",
+                        mime="application/zip",
+                        key="dl_backup_zip_settings_tab",
+                    )
+                    loc = upload_backup_to_supabase(buf)
+                    if loc:
+                        st.info(f"Also saved to Supabase Storage at: {loc}")
+
+            with bcol2:
+                up = st.file_uploader(
+                    "⬆️ Restore from prediction_backup.zip",
+                    type="zip",
+                    key="upload_restore_zip_settings_tab",
+                )
+                if up and st.button("Restore Now", key="btn_restore_now_settings_tab"):
+                    restore_from_zip(up)
+                    restored_preds = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+                    recompute_leaderboard(restored_preds)
+                    st.success("Backup restored. Reloading…")
+                    st.rerun()
+
     with tab_users:
-        st.info("Continue to Part 6 to paste Users + OTP.")
+        st.subheader("👤 Users")
+
+        users_df = load_users()
+        if users_df.empty:
+            st.info("No users yet." if LANG_CODE=="en" else "لا يوجد مستخدمون بعد.")
+        else:
+            show = users_df.copy().sort_values("CreatedAt")
+            show = show.rename(columns={"Name": tr(LANG_CODE, "lb_user"), "IsBanned": "Banned"})
+            st.dataframe(show[[tr(LANG_CODE, "lb_user"), "CreatedAt", "Banned"]], use_container_width=True)
+
+            st.markdown("---")
+            target_name = st.selectbox(
+                "Select user",
+                options=show[tr(LANG_CODE, "lb_user")].tolist(),
+                key="users_select_target_tab_users",
+            )
+
+            act1, act2, act3 = st.columns([1, 1, 2])
+            with act1:
+                if st.button(tr(LANG_CODE, "terminate"), key="btn_terminate_tab_users"):
+                    u = load_users()
+                    mask = u["Name"].astype(str).str.strip().str.casefold() == str(target_name).strip().casefold()
+                    if not mask.any():
+                        st.error("User not found." if LANG_CODE=="en" else "المستخدم غير موجود.")
+                    else:
+                        u.loc[mask, "IsBanned"] = 1
+                        save_users(u)
+                        st.success(tr(LANG_CODE, "terminated"))
+                        st.rerun()
+
+            with act2:
+                del_label = "Delete user" if LANG_CODE == "en" else "حذف المستخدم"
+                if st.button(del_label, key="btn_delete_user_tab_users"):
+                    u = load_users()
+                    mask_keep = u["Name"].astype(str).str.strip().str.casefold() != str(target_name).strip().casefold()
+                    if mask_keep.all():
+                        st.error("User not found." if LANG_CODE=="en" else "المستخدم غير موجود.")
+                    else:
+                        u = u[mask_keep]
+                        save_users(u)
+                        p = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+                        p = p[p["User"].astype(str).str.strip().str.casefold() != str(target_name).strip().casefold()]
+                        save_csv(p, PREDICTIONS_FILE)
+                        recompute_leaderboard(p)
+                        otp_revoke(str(target_name))
+                        st.success("User deleted." if LANG_CODE=="en" else "تم حذف المستخدم.")
+                        st.rerun()
+
+            with act3:
+                st.caption("Delete removes the user and their predictions, then recalculates the leaderboard.")
+
+            st.markdown("---")
+            st.markdown("### 🔐 OTP PIN Reset (Admin generates OTP)")
+            st.caption("Generate a one-time OTP code for the selected user (valid for 10 minutes). Give it to the user.")
+
+            otp_c1, otp_c2, otp_c3 = st.columns([1, 1, 2])
+            with otp_c1:
+                if st.button("Generate OTP", key="btn_generate_otp_tab_users"):
+                    code = otp_generate(str(target_name), minutes_valid=10)
+                    st.session_state["last_otp_user"] = str(target_name)
+                    st.session_state["last_otp_code"] = str(code)
+                    st.success("OTP generated below ✅")
+
+            with otp_c2:
+                if st.button("Revoke OTP for user", key="btn_revoke_otp_tab_users"):
+                    otp_revoke(str(target_name))
+                    st.session_state.pop("last_otp_user", None)
+                    st.session_state.pop("last_otp_code", None)
+                    st.success("OTP revoked ✅")
+
+            with otp_c3:
+                st.caption("Tip: OTP expires automatically.")
+
+            last_user = st.session_state.get("last_otp_user")
+            last_code = st.session_state.get("last_otp_code")
+            if last_user and last_code and str(last_user) == str(target_name):
+                st.code(f"OTP for {target_name}: {last_code}")
+
     with tab_manual:
-        st.info("Continue to Part 6 to paste Manual Edit (Overrides).")
+        st.subheader("✏️ Manual Overrides (Predictions & Points)")
+
+        preds_now_for_edit = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
+        lb_current = recompute_leaderboard(preds_now_for_edit).copy()
+        overrides = load_overrides()
+
+        if lb_current.empty:
+            st.info(tr(LANG_CODE, "no_scores_yet"))
+        else:
+            merged = lb_current.merge(overrides, on="User", how="left", suffixes=("", "_ovr"))
+
+            def _coalesce(a, b):
+                return b if pd.notna(b) else a
+
+            merged["Predictions"] = merged.apply(lambda r: _coalesce(r.get("Predictions"), r.get("Predictions_ovr")), axis=1)
+            merged["Points"] = merged.apply(lambda r: _coalesce(r.get("Points"), r.get("Points_ovr")), axis=1)
+
+            merged = merged.sort_values(["Points", "Predictions", "Exact"], ascending=[False, True, False]).reset_index(drop=True)
+            merged.insert(0, tr(LANG_CODE, "lb_rank"), range(1, len(merged) + 1))
+
+            col_map = {
+                "User": tr(LANG_CODE, "lb_user"),
+                "Predictions": tr(LANG_CODE, "lb_preds"),
+                "Exact": tr(LANG_CODE, "lb_exact"),
+                "Outcome": tr(LANG_CODE, "lb_outcome"),
+                "Points": tr(LANG_CODE, "lb_points"),
+            }
+            preview = merged[[tr(LANG_CODE, "lb_rank"), "User", "Predictions", "Exact", "Outcome", "Points"]].rename(columns=col_map)
+            st.dataframe(preview, use_container_width=True)
+
+            st.markdown("#### Edit an entry")
+            edit_col1, edit_col2, edit_col3, edit_col4 = st.columns([2, 1, 1, 1])
+
+            with edit_col1:
+                user_pick = st.selectbox("User", options=lb_current["User"].tolist(), key="override_user_pick")
+            with edit_col2:
+                new_preds = st.number_input(
+                    "Predictions (override)",
+                    min_value=0,
+                    value=int(lb_current.loc[lb_current["User"] == user_pick, "Predictions"].iloc[0]),
+                    key="override_preds_value",
+                )
+            with edit_col3:
+                new_points = st.number_input(
+                    "Points (override)",
+                    min_value=0,
+                    value=int(lb_current.loc[lb_current["User"] == user_pick, "Points"].iloc[0]),
+                    key="override_points_value",
+                )
+            with edit_col4:
+                if st.button("Save Override", key="btn_save_override"):
+                    o = load_overrides()
+                    if not o.empty and (o["User"] == user_pick).any():
+                        o.loc[o["User"] == user_pick, ["Predictions", "Points"]] = [int(new_preds), int(new_points)]
+                    else:
+                        o = pd.concat([o, pd.DataFrame([{"User": user_pick, "Predictions": int(new_preds), "Points": int(new_points)}])], ignore_index=True)
+                    save_overrides(o)
+                    st.success("Override saved.")
+                    st.rerun()
+
+            util_c1, util_c2, util_c3 = st.columns([1, 1, 1])
+            with util_c1:
+                if st.button("Clear Override for Selected User", key="btn_clear_override_user"):
+                    o = load_overrides()
+                    o = o[o["User"] != user_pick]
+                    save_overrides(o)
+                    st.success("Override cleared.")
+                    st.rerun()
+            with util_c2:
+                if st.button("Clear ALL Overrides", key="btn_clear_override_all"):
+                    save_overrides(pd.DataFrame(columns=["User", "Predictions", "Points"]))
+                    st.success("All overrides cleared.")
+                    st.rerun()
+            with util_c3:
+                if st.button("Apply Overrides → Write Leaderboard.csv", key="btn_apply_override_write"):
+                    applied = lb_current.merge(load_overrides(), on="User", how="left", suffixes=("", "_ovr"))
+                    applied["Predictions"] = applied.apply(lambda r: _coalesce(r.get("Predictions"), r.get("Predictions_ovr")), axis=1)
+                    applied["Points"] = applied.apply(lambda r: _coalesce(r.get("Points"), r.get("Points_ovr")), axis=1)
+                    applied = applied[["User", "Points", "Predictions", "Exact", "Outcome"]]
+                    applied = applied.sort_values(["Points", "Predictions", "Exact"], ascending=[False, True, False])
+                    save_csv(applied, LEADERBOARD_FILE)
+                    st.success("Applied overrides to leaderboard.csv")
 
     return
-with tab_settings:
-    st.subheader("⚙️ Settings")
 
-    with st.expander("🏁 Season", expanded=True):
-        current_season = ""
-        if os.path.exists(SEASON_FILE):
-            try:
-                with open(SEASON_FILE, "r", encoding="utf-8") as f:
-                    current_season = f.read().strip()
-            except Exception:
-                pass
-
-        season_name = st.text_input(
-            tr(LANG_CODE, "season_name_label"),
-            value=current_season,
-            key="season_name_settings_tab",
-        )
-
-        c1, c2, c3 = st.columns([1, 1, 2])
-        with c1:
-            if st.button("Save season name", key="btn_save_season_settings_tab"):
-                try:
-                    with open(SEASON_FILE, "w", encoding="utf-8") as f:
-                        f.write((season_name or "").strip())
-                    st.success(tr(LANG_CODE, "season_saved"))
-                except Exception as e:
-                    st.error(str(e))
-
-        with c2:
-            if st.button("Reset season (danger)", key="btn_reset_season_settings_tab"):
-                def _safe_remove(p):
-                    try:
-                        if os.path.exists(p):
-                            os.remove(p)
-                    except Exception:
-                        pass
-
-                for f in [
-                    USERS_FILE, MATCHES_FILE, MATCH_HISTORY_FILE,
-                    PREDICTIONS_FILE, LEADERBOARD_FILE,
-                    SEASON_FILE, LEADERBOARD_OVERRIDES_FILE,
-                    OTP_FILE
-                ]:
-                    _safe_remove(f)
-
-                st.session_state.pop("role", None)
-                st.session_state.pop("current_name", None)
-                st.success(tr(LANG_CODE, "reset_confirm"))
-                st.rerun()
-
-        with c3:
-            st.caption("Reset clears users/matches/predictions/leaderboard/overrides/OTP. Team logos are kept.")
-
-    with st.expander("🧪 Insert Test Data", expanded=False):
-        if st.button(tr(LANG_CODE, "test_data"), key="btn_test_data_settings_tab"):
-            tz_local = ZoneInfo("Asia/Riyadh")
-            now = datetime.now(tz_local)
-            samples = [
-                ("Real Madrid", "Barcelona",
-                 "https://upload.wikimedia.org/wikipedia/en/5/56/Real_Madrid_CF.svg",
-                 "https://upload.wikimedia.org/wikipedia/en/4/47/FC_Barcelona_%28crest%29.svg",
-                 now + timedelta(days=1), 9, 0, tr(LANG_CODE, "ampm_pm"), True, "El Clásico",
-                 "https://upload.wikimedia.org/wikipedia/commons/8/8f/Trophy_icon.png", "Round 1"),
-                ("Al Hilal", "Al Nassr",
-                 "https://upload.wikimedia.org/wikipedia/en/f/f1/Al_Hilal_SFC_Logo.svg",
-                 "https://upload.wikimedia.org/wikipedia/en/5/53/Al-Nassr_logo_2020.svg",
-                 now + timedelta(days=3), 9, 0, tr(LANG_CODE, "ampm_pm"), False, "Saudi Derby",
-                 "https://upload.wikimedia.org/wikipedia/commons/8/8f/Trophy_icon.png", "Round 2"),
-            ]
-
-            cols = ["Match","Kickoff","Result","HomeLogo","AwayLogo","BigGame","RealWinner","Occasion","OccasionLogo","Round"]
-            m = load_csv(MATCHES_FILE, cols)
-
-            for A, B, Au, Bu, dt_, hr, mi, ap, big, occ, occlogo, rnd in samples:
-                is_pm = (ap in ["PM","مساء"])
-                hr24 = (0 if hr == 12 else int(hr)) + (12 if is_pm else 0)
-                ko = datetime(dt_.year, dt_.month, dt_.day, hr24, int(mi), tzinfo=tz_local)
-
-                A_logo = cache_logo_from_url(Au) or Au
-                B_logo = cache_logo_from_url(Bu) or Bu
-                occ_logo = cache_logo_from_url(occlogo) or occlogo
-
-                save_team_logo(A, A_logo)
-                save_team_logo(B, B_logo)
-
-                row = pd.DataFrame([{
-                    "Match": f"{A} vs {B}",
-                    "Kickoff": ko.isoformat(),
-                    "Result": None,
-                    "HomeLogo": A_logo,
-                    "AwayLogo": B_logo,
-                    "BigGame": bool(big),
-                    "RealWinner": "",
-                    "Occasion": occ,
-                    "OccasionLogo": occ_logo,
-                    "Round": rnd,
-                }])
-                m = pd.concat([m, row], ignore_index=True)
-
-            save_csv(m, MATCHES_FILE)
-            st.success(tr(LANG_CODE, "test_done"))
-            st.rerun()
-
-    with st.expander("📦 Backup & Restore", expanded=True):
-        bcol1, bcol2 = st.columns([1, 1])
-
-        with bcol1:
-            if st.button("⬇️ Backup Now", key="btn_backup_now_settings_tab"):
-                buf = create_backup_zip()
-                st.download_button(
-                    "Download prediction_backup.zip",
-                    data=buf.getvalue(),
-                    file_name="prediction_backup.zip",
-                    mime="application/zip",
-                    key="dl_backup_zip_settings_tab",
-                )
-                loc = upload_backup_to_supabase(buf)
-                if loc:
-                    st.info(f"Also saved to Supabase Storage at: {loc}")
-
-        with bcol2:
-            up = st.file_uploader(
-                "⬆️ Restore from backup.zip",
-                type="zip",
-                key="upload_restore_zip_settings_tab",
-            )
-            if up and st.button("Restore Now", key="btn_restore_now_settings_tab"):
-                restore_from_zip(up)
-                restored_preds = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
-                recompute_leaderboard(restored_preds)
-                st.success("Backup restored. Reloading…")
-                st.rerun()
-
-with tab_users:
-    st.subheader("👤 Users")
-
-    users_df = load_users()
-    if users_df.empty:
-        st.info("No users yet." if LANG_CODE=="en" else "لا يوجد مستخدمون بعد.")
-    else:
-        show = users_df.copy().sort_values("CreatedAt")
-        show = show.rename(columns={"Name": tr(LANG_CODE, "lb_user"), "IsBanned": "Banned"})
-        st.dataframe(show[[tr(LANG_CODE,"lb_user"), "CreatedAt", "Banned"]], use_container_width=True)
-
-        st.markdown("---")
-        target_name = st.selectbox(
-            "Select user",
-            options=show[tr(LANG_CODE, "lb_user")].tolist(),
-            key="users_select_target_tab_users",
-        )
-
-        act1, act2, act3 = st.columns([1, 1, 2])
-        with act1:
-            if st.button(tr(LANG_CODE, "terminate"), key="btn_terminate_tab_users"):
-                u = load_users()
-                mask = u["Name"].astype(str).str.strip().str.casefold() == str(target_name).strip().casefold()
-                if not mask.any():
-                    st.error("User not found." if LANG_CODE=="en" else "المستخدم غير موجود.")
-                else:
-                    u.loc[mask, "IsBanned"] = 1
-                    save_users(u)
-                    st.success(tr(LANG_CODE, "terminated"))
-                    st.rerun()
-
-        with act2:
-            del_label = "Delete user" if LANG_CODE == "en" else "حذف المستخدم"
-            if st.button(del_label, key="btn_delete_user_tab_users"):
-                u = load_users()
-                mask_keep = u["Name"].astype(str).str.strip().str.casefold() != str(target_name).strip().casefold()
-                if mask_keep.all():
-                    st.error("User not found." if LANG_CODE=="en" else "المستخدم غير موجود.")
-                else:
-                    u = u[mask_keep]
-                    save_users(u)
-
-                    p = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
-                    p = p[p["User"].astype(str).str.strip().str.casefold() != str(target_name).strip().casefold()]
-                    save_csv(p, PREDICTIONS_FILE)
-                    recompute_leaderboard(p)
-
-                    otp_revoke(str(target_name))
-                    st.success("User deleted." if LANG_CODE=="en" else "تم حذف المستخدم.")
-                    st.rerun()
-
-        with act3:
-            st.caption("Delete removes the user and their predictions, then recalculates the leaderboard.")
-
-        st.markdown("---")
-        st.markdown("### 🔐 OTP PIN Reset (Admin generates OTP)")
-        st.caption("Generate a one-time OTP code for the selected user (valid for 10 minutes). Give it to the user.")
-
-        otp_c1, otp_c2, otp_c3 = st.columns([1, 1, 2])
-        with otp_c1:
-            if st.button("Generate OTP", key="btn_generate_otp_tab_users"):
-                code = otp_generate(str(target_name), minutes_valid=10)
-                st.session_state["last_otp_user"] = str(target_name)
-                st.session_state["last_otp_code"] = str(code)
-                st.success("OTP generated below ✅")
-
-        with otp_c2:
-            if st.button("Revoke OTP for user", key="btn_revoke_otp_tab_users"):
-                otp_revoke(str(target_name))
-                st.session_state.pop("last_otp_user", None)
-                st.session_state.pop("last_otp_code", None)
-                st.success("OTP revoked ✅")
-
-        with otp_c3:
-            st.caption("Tip: OTP expires automatically.")
-
-        last_user = st.session_state.get("last_otp_user")
-        last_code = st.session_state.get("last_otp_code")
-        if last_user and last_code and str(last_user) == str(target_name):
-            st.code(f"OTP for {target_name}: {last_code}")
-
-with tab_manual:
-    st.subheader("✏️ Manual Overrides (Predictions & Points)")
-
-    preds_now_for_edit = load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"])
-    lb_current_raw = recompute_leaderboard(preds_now_for_edit).copy()
-    overrides = load_overrides()
-
-    if lb_current_raw.empty:
-        st.info(tr(LANG_CODE, "no_scores_yet"))
-    else:
-        merged = lb_current_raw.merge(overrides, on="User", how="left", suffixes=("", "_ovr"))
-
-        def _coalesce(a, b):
-            return b if pd.notna(b) else a
-
-        merged["Predictions"] = merged.apply(lambda r: _coalesce(r.get("Predictions"), r.get("Predictions_ovr")), axis=1)
-        merged["Points"]      = merged.apply(lambda r: _coalesce(r.get("Points"),      r.get("Points_ovr")), axis=1)
-
-        merged["Points"] = pd.to_numeric(merged["Points"], errors="coerce").fillna(0).astype(int)
-        merged["Predictions"] = pd.to_numeric(merged["Predictions"], errors="coerce").fillna(0).astype(int)
-
-        merged = merged.sort_values(["Points","Predictions","Exact"], ascending=[False, True, False]).reset_index(drop=True)
-        merged.insert(0, tr(LANG_CODE, "lb_rank"), range(1, len(merged) + 1))
-
-        col_map = {
-            "User": tr(LANG_CODE,"lb_user"),
-            "Predictions": tr(LANG_CODE,"lb_preds"),
-            "Exact": tr(LANG_CODE,"lb_exact"),
-            "Outcome": tr(LANG_CODE,"lb_outcome"),
-            "Points": tr(LANG_CODE,"lb_points"),
-        }
-        preview = merged[[tr(LANG_CODE,"lb_rank"), "User","Predictions","Exact","Outcome","Points"]].rename(columns=col_map)
-        st.dataframe(preview, use_container_width=True)
-
-        st.markdown("#### Edit an entry")
-        edit_col1, edit_col2, edit_col3, edit_col4 = st.columns([2,1,1,1])
-
-        with edit_col1:
-            user_pick = st.selectbox("User", options=lb_current_raw["User"].tolist(), key="override_user_pick")
-        with edit_col2:
-            cur_preds = int(lb_current_raw.loc[lb_current_raw["User"]==user_pick, "Predictions"].iloc[0])
-            if not overrides.empty and (overrides["User"] == user_pick).any():
-                try:
-                    cur_preds = int(overrides.loc[overrides["User"]==user_pick, "Predictions"].iloc[0])
-                except Exception:
-                    pass
-            new_preds = st.number_input("Predictions (override)", min_value=0, value=int(cur_preds), key="override_preds_value")
-        with edit_col3:
-            cur_pts = int(lb_current_raw.loc[lb_current_raw["User"]==user_pick, "Points"].iloc[0])
-            if not overrides.empty and (overrides["User"] == user_pick).any():
-                try:
-                    cur_pts = int(overrides.loc[overrides["User"]==user_pick, "Points"].iloc[0])
-                except Exception:
-                    pass
-            new_points = st.number_input("Points (override)", min_value=0, value=int(cur_pts), key="override_points_value")
-        with edit_col4:
-            if st.button("Save Override", key="btn_save_override"):
-                o = load_overrides()
-                if not o.empty and (o["User"] == user_pick).any():
-                    o.loc[o["User"] == user_pick, ["Predictions","Points"]] = [int(new_preds), int(new_points)]
-                else:
-                    o = pd.concat([o, pd.DataFrame([{
-                        "User": user_pick,
-                        "Predictions": int(new_preds),
-                        "Points": int(new_points),
-                    }])], ignore_index=True)
-                save_overrides(o)
-
-                base_lb = recompute_leaderboard(load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"]))
-                final_lb = apply_overrides_to_leaderboard(base_lb)
-                save_csv(final_lb, LEADERBOARD_FILE)
-
-                st.success("Override saved and applied to users ✅")
-                st.rerun()
-
-        util_c1, util_c2, util_c3 = st.columns([1,1,1])
-        with util_c1:
-            if st.button("Clear Override for Selected User", key="btn_clear_override_user"):
-                o = load_overrides()
-                o = o[o["User"] != user_pick]
-                save_overrides(o)
-
-                base_lb = recompute_leaderboard(load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"]))
-                final_lb = apply_overrides_to_leaderboard(base_lb)
-                save_csv(final_lb, LEADERBOARD_FILE)
-
-                st.success("Override cleared and applied ✅")
-                st.rerun()
-        with util_c2:
-            if st.button("Clear ALL Overrides", key="btn_clear_override_all"):
-                save_overrides(pd.DataFrame(columns=["User","Predictions","Points"]))
-
-                base_lb = recompute_leaderboard(load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"]))
-                final_lb = apply_overrides_to_leaderboard(base_lb)
-                save_csv(final_lb, LEADERBOARD_FILE)
-
-                st.success("All overrides cleared and applied ✅")
-                st.rerun()
-        with util_c3:
-            if st.button("Re-Apply Overrides Now", key="btn_apply_override_write"):
-                base_lb = recompute_leaderboard(load_csv(PREDICTIONS_FILE, ["User","Match","Prediction","Winner","SubmittedAt"]))
-                final_lb = apply_overrides_to_leaderboard(base_lb)
-                save_csv(final_lb, LEADERBOARD_FILE)
-                st.success("Applied overrides to users ✅")
-
-return
 
 def run_app():
-    st.sidebar.subheader(tr('en','sidebar_lang') + " / " + tr('ar','sidebar_lang'))
-    lang_choice = st.sidebar.radio("", [tr('en','lang_en'), tr('ar','lang_ar')], index=0, horizontal=True)
-    LANG_CODE = 'ar' if lang_choice == tr('ar','lang_ar') else 'en'
+    st.sidebar.subheader(tr("en", "sidebar_lang") + " / " + tr("ar", "sidebar_lang"))
+    lang_choice = st.sidebar.radio("", [tr("en", "lang_en"), tr("ar", "lang_ar")], index=0, horizontal=True)
+    LANG_CODE = "ar" if lang_choice == tr("ar", "lang_ar") else "en"
 
-    st.sidebar.subheader(tr(LANG_CODE,'sidebar_time'))
+    st.sidebar.subheader(tr(LANG_CODE, "sidebar_time"))
 
     _setup_browser_timezone_param()
     detected_tz = _get_tz_from_query_params(default_tz="Asia/Riyadh") or "Asia/Riyadh"
@@ -1794,17 +2075,13 @@ def run_app():
         "Asia/Riyadh", "Asia/Dubai", "Asia/Kolkata", "Asia/Singapore", "Asia/Tokyo", "Asia/Shanghai", "Asia/Hong_Kong",
         "Australia/Sydney",
         "America/Sao_Paulo",
-        "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles"
+        "America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
     ]
     if detected_tz and detected_tz not in common_tz:
         common_tz.insert(0, detected_tz)
 
     label_auto = f"🧭 Use browser time zone ({detected_tz})"
-    tz_choice = st.sidebar.selectbox(
-        tr(LANG_CODE,'app_timezone'),
-        [label_auto] + common_tz,
-        index=0
-    )
+    tz_choice = st.sidebar.selectbox(tr(LANG_CODE, "app_timezone"), [label_auto] + common_tz, index=0)
     tz_str = detected_tz if tz_choice == label_auto else tz_choice
 
     try:
@@ -1817,7 +2094,7 @@ def run_app():
 
     tz = ZoneInfo(tz_str)
 
-    if st.sidebar.button("Logout" if LANG_CODE=="en" else "تسجيل الخروج"):
+    if st.sidebar.button("Logout" if LANG_CODE == "en" else "تسجيل الخروج"):
         st.session_state.pop("role", None)
         st.session_state.pop("current_name", None)
         st.rerun()
@@ -1830,6 +2107,7 @@ def run_app():
         page_admin(LANG_CODE, tz)
     else:
         page_login(LANG_CODE)
+
 
 if __name__ == "__main__":
     try:
